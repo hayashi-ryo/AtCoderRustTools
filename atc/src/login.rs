@@ -42,21 +42,20 @@ fn prompt_password(prompt: &str) -> Result<String, io::Error> {
 
 pub async fn login_to_atcoder(
     credentials: &UserCredentials,
+    base_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let login_url = "https://atcoder.jp/login";
-
-    // Cookieストアを作成
     let cookie_store = Arc::new(Jar::default());
+    let login_url = format!("{}/login", base_url);
 
-    // Cookieストアを持つClientを作成
     let client = Client::builder()
         .cookie_store(true)
         .cookie_provider(Arc::clone(&cookie_store))
+        .redirect(reqwest::redirect::Policy::none()) // リダイレクトを無効化
         .build()?;
 
-    // csrf_tokenを取得
+    // CSRFトークンを取得
     let selector = Selector::parse("input[name=\"csrf_token\"]").unwrap();
-    let body = client.get(login_url).send().await?.text().await?;
+    let body = client.get(&login_url).send().await?.text().await?;
     let document = Html::parse_document(&body);
     let csrf_token = document
         .select(&selector)
@@ -67,26 +66,118 @@ pub async fn login_to_atcoder(
         .unwrap()
         .to_string();
 
-    // ログインデータの作成
+    println!("CSRFトークン: {}", csrf_token);
+
     let login_form = [
         ("username", credentials.user_id.as_str()),
         ("password", credentials.password.as_str()),
         ("csrf_token", csrf_token.as_str()),
     ];
 
-    // ログインリクエストの送信
-    let login_response = client.post(login_url).form(&login_form).send().await?;
-    login_response.error_for_status_ref()?;
-    let response_url = login_response.url().to_string();
-    if response_url == "https://atcoder.jp/home" {
-        println!("ログインに成功しました！");
-        Ok(())
+    let login_response = client.post(&login_url).form(&login_form).send().await?;
+    let status = login_response.status();
+
+    if status == reqwest::StatusCode::FOUND {
+        if let Some(location) = login_response.headers().get("Location") {
+            let location_str = location.to_str()?;
+            println!("Locationヘッダー: {}", location_str);
+            if location_str == "/home" {
+                println!("ログインに成功しました！");
+                return Ok(());
+            } else {
+                return Err(format!(
+                    "ログイン失敗: Locationが/homeではありません ({})",
+                    location_str
+                )
+                .into());
+            }
+        }
+        Err("ログイン失敗: Locationヘッダーが見つかりません".into())
     } else {
-        println!("ログインに失敗しました:");
-        Err(format!(
-            "ログイン失敗: リダイレクト先が/homeではありません ({})",
-            response_url
-        )
-        .into())
+        Err(format!("ログイン失敗: ステータスコードが想定外です ({})", status).into())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use mockito::{Matcher, Server};
+
+    #[tokio::test]
+    async fn login_to_atcoder_success() {
+        let mut server = Server::new_async().await;
+        let base_url = server.url();
+        let home_url = format!("{}/home", &base_url);
+        let _get_mock = server
+            .mock("GET", "/login")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body(
+                r#"
+                <html>
+                    <form>
+                        <input type="hidden" name="csrf_token" value="mock_csrf_token">
+                    </form>
+                </html>
+            "#,
+            )
+            .create();
+        let _post_mock = server
+            .mock("POST", "/login")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("username=mock_user".to_string()),
+                Matcher::Regex("password=mock_password".to_string()),
+                Matcher::Regex("csrf_token=mock_csrf_token".to_string()),
+            ]))
+            .with_status(302) // リダイレクトを模倣
+            .with_header("Location", "/home") // リダイレクト先
+            .create();
+
+        let credentials =
+            UserCredentials::new("mock_user".to_string(), "mock_password".to_string());
+
+        let response = login_to_atcoder(&credentials, &base_url).await;
+        assert!(response.is_ok());
+
+        _get_mock.assert();
+        _post_mock.assert();
+    }
+
+    #[tokio::test]
+    async fn login_to_atcoder_failed() {
+        let mut server = Server::new_async().await;
+        let base_url = server.url();
+
+        let _get_mock = server
+            .mock("GET", "/login")
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body(
+                r#"
+            <html>
+                <form>
+                    <input type="hidden" name="csrf_token" value="mock_csrf_token">
+                </form>
+            </html>
+        "#,
+            )
+            .create();
+        let _post_mock = server
+            .mock("POST", "/login")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex("username=mock_user".to_string()),
+                Matcher::Regex("password=mock_password".to_string()),
+                Matcher::Regex("csrf_token=mock_csrf_token".to_string()),
+            ]))
+            .with_status(200) // リダイレクトを模倣
+            .with_header("Location", "/home") // リダイレクト先
+            .create();
+        let credentials =
+            UserCredentials::new("mock_user".to_string(), "mock_password".to_string());
+        let response = login_to_atcoder(&credentials, &base_url).await;
+        assert!(response.is_err());
+        // モックが期待通り呼び出されたことを確認
+        _get_mock.assert();
+        _post_mock.assert();
     }
 }
