@@ -3,9 +3,26 @@ use reqwest::Client;
 use rpassword::read_password;
 use scraper::{Html, Selector};
 use std::{
+    error::Error,
     io::{self, Write},
     sync::Arc,
 };
+
+pub async fn execute() -> Result<(), Box<dyn Error>> {
+    println!("ログイン処理を開始します...");
+    let base_url = "https://atcoder.jp";
+    let credentials = match get_credentials() {
+        Ok(credentials) => credentials,
+        Err(e) => return Err(format!("ログイン情報の取得に失敗しました: {}", e).into()),
+    };
+    match login_to_atcoder(&credentials, base_url).await {
+        Ok(_) => {
+            println!("AtCoderへのログインが完了しました！");
+            Ok(())
+        }
+        Err(e) => Err(format!("ログイン中にエラーが発生しました: {}", e).into()),
+    }
+}
 
 pub struct UserCredentials {
     pub user_id: String,
@@ -107,7 +124,6 @@ mod test {
     async fn login_to_atcoder_success() {
         let mut server = Server::new_async().await;
         let base_url = server.url();
-        let home_url = format!("{}/home", &base_url);
         let _get_mock = server
             .mock("GET", "/login")
             .with_status(200)
