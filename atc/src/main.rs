@@ -25,7 +25,7 @@ async fn main() {
             }
         }
         Commands::Test => {
-            if let Err(e) = commands::login::execute().await {
+            if let Err(e) = commands::test::execute() {
                 eprintln!("Error: {}", e);
             }
         }
