@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -64,11 +65,78 @@ fn measure_execution_time(executable: &Path, input_file: &Path) -> Result<u128, 
     Ok(duration)
 }
 
+fn get_execution_output(executable: &Path, input_file: &Path) -> Result<String, Box<dyn Error>> {
+    let input_data = fs::read_to_string(input_file)?;
+    let mut child = Command::new(executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input_data.as_bytes())?;
+    }
+    let output = child.wait_with_output()?.stdout;
+    let mut output_str = String::from_utf8_lossy(&output).to_string();
+    if !output_str.ends_with('\n') {
+        output_str.push('\n');
+    }
+
+    Ok(output_str)
+}
+
+fn validate_output(actual: &str, expected: &str) -> Result<(), String> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "Output mismatch:\nExpected:\n{}\nActual:\n{}",
+            expected, actual
+        ))
+    }
+}
+
+fn return_results(
+    test_cases: Vec<(PathBuf, PathBuf)>,
+    executable: &Path,
+) -> Result<(), Box<dyn Error>> {
+    Ok(())
+}
 #[cfg(test)]
 mod test {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn execute_success() {
+        let test_dir = "test_execute";
+        std::fs::create_dir_all(test_dir).unwrap();
+        std::fs::write(
+            format!("{}/Cargo.toml", test_dir),
+            r#"
+            [package]
+            name = "test_execute"
+            version = "0.1.0"
+            edition = "2021"
+        "#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(format!("{}/src", test_dir)).unwrap();
+        std::fs::write(
+            format!("{}/src/main.rs", test_dir),
+            r#"
+            fn main() {
+                println!("Hello, AtCoder!");
+            }
+        "#,
+        )
+        .unwrap();
+        std::fs::write(format!("{}/sample_1.in", test_dir), "input1").unwrap();
+        std::fs::write(format!("{}/sample_1.out", test_dir), "Hello, AtCoder!\n").unwrap();
+
+        let result = execute("test_execute");
+        assert!(result.is_ok());
+
+        std::fs::remove_dir_all(test_dir).unwrap();
+    }
     #[test]
     fn find_problem_directory_success() {
         // preparation
@@ -127,6 +195,10 @@ mod test {
 
         // post-process
         fs::remove_dir_all(test_dir).unwrap();
+        let executable_clear = Command::new("cargo")
+            .arg("clean")
+            .current_dir(test_dir)
+            .status();
     }
 
     #[test]
@@ -195,11 +267,11 @@ mod test {
 
     #[test]
     fn measure_execution_time_success() {
-        let executable = Path::new("./test_executable");
+        let executable_meacure_time = Path::new("./test_executable_meacure_time");
         let input_file = "test_input_1.in";
         std::fs::write(input_file, "test input").unwrap();
         std::fs::write(
-            executable,
+            executable_meacure_time,
             r#"#!/bin/bash
             echo "Hello"
             "#,
@@ -208,15 +280,16 @@ mod test {
 
         std::process::Command::new("chmod")
             .arg("+x")
-            .arg(executable)
+            .arg(executable_meacure_time)
             .status()
             .unwrap();
 
-        let duration = measure_execution_time(executable, Path::new(input_file)).unwrap();
+        let duration =
+            measure_execution_time(executable_meacure_time, Path::new(input_file)).unwrap();
         assert!(duration > 0);
 
         std::fs::remove_file(input_file).unwrap();
-        std::fs::remove_file(executable).unwrap();
+        std::fs::remove_file(executable_meacure_time).unwrap();
     }
 
     #[test]
@@ -226,5 +299,120 @@ mod test {
             Path::new("test_input.in"),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn get_execution_output_success() {
+        let executable_get_output = Path::new("./test_executable_get_output");
+        let input_file = "test_input.in";
+        let input_content = "test input data\n";
+        std::fs::write(input_file, input_content).unwrap();
+        if executable_get_output.exists() {
+            std::fs::remove_file(executable_get_output).unwrap();
+        }
+        std::fs::write(
+            executable_get_output,
+            r#"#!/bin/bash
+            cat
+            "#, // 標準入力をそのまま標準出力に返す
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(executable_get_output)
+            .status()
+            .unwrap();
+
+        let output = get_execution_output(executable_get_output, Path::new(input_file)).unwrap();
+        assert_eq!(output, input_content);
+        std::fs::remove_file(input_file).unwrap();
+        std::fs::remove_file(executable_get_output).unwrap();
+    }
+
+    #[test]
+    fn get_execution_output_failed() {
+        let result = get_execution_output(
+            Path::new("non_existent_executable"),
+            Path::new("test_input.in"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_output_success() {
+        let result = validate_output("expected output\n", "expected output\n");
+        assert!(result.is_ok());
+    }
+    #[test]
+    fn validate_output_failed() {
+        let result = validate_output("expected output\n", "actual output\n");
+        assert!(result.is_err());
+        let error_message = result.unwrap_err();
+        assert!(error_message.contains("Output mismatch"));
+    }
+
+    #[test]
+    fn return_results_success() {
+        let executable = Path::new("./test_executable");
+        let test_dir = "test_return_results";
+        let input_file_path = format!("{}/sample_1.in", test_dir);
+        let output_file_path = format!("{}/sample_1.out", test_dir);
+        let input_file = Path::new(&input_file_path); // ここで借用元を明示
+        let output_file = Path::new(&output_file_path);
+
+        std::fs::create_dir_all(test_dir).unwrap();
+        std::fs::write(input_file, "test input").unwrap();
+        std::fs::write(output_file, "Test Output").unwrap();
+        std::fs::write(
+            executable,
+            r#"#!/bin/bash
+            echo "Test Output"
+            "#,
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(executable)
+            .status()
+            .unwrap();
+
+        let test_cases = vec![(input_file.to_path_buf(), output_file.to_path_buf())];
+        let result = return_results(test_cases, executable);
+        assert!(result.is_ok());
+
+        std::fs::remove_dir_all(test_dir).unwrap();
+        std::fs::remove_file(executable).unwrap();
+    }
+
+    #[test]
+    fn return_results_failed() {
+        let executable = Path::new("./test_executable");
+        let test_dir = "test_return_results_failure";
+        let input_file_path = format!("{}/sample_1.in", test_dir);
+        let output_file_path = format!("{}/sample_1.out", test_dir);
+        let input_file = Path::new(&input_file_path); // ここで借用元を明示
+        let output_file = Path::new(&output_file_path);
+        std::fs::create_dir_all(test_dir).unwrap();
+        std::fs::write(input_file, "test input").unwrap();
+        std::fs::write(output_file, "Expected Output").unwrap();
+        std::fs::write(
+            executable,
+            r#"#!/bin/bash
+        echo "Actual Output"
+        "#,
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(executable)
+            .status()
+            .unwrap();
+
+        let test_cases = vec![(input_file.to_path_buf(), output_file.to_path_buf())];
+        let result = return_results(test_cases, executable);
+        assert!(result.is_ok()); // 処理としてはエラーを返さない
+
+        std::fs::remove_dir_all(test_dir).unwrap();
+        std::fs::remove_file(executable).unwrap();
     }
 }
