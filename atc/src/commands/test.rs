@@ -7,7 +7,10 @@ use std::time::Instant;
 
 pub fn execute(problem_name: &str) -> Result<(), Box<dyn Error>> {
     let dir = find_problem_directory(problem_name)?;
-    let _ = compile(&dir)?;
+    compile(&dir)?;
+    let test_cases = collect_test_cases(&dir)?;
+    let executable = dir.join("target/debug/test_project");
+    return_results(test_cases, &executable)?;
     Ok(())
 }
 
@@ -48,6 +51,7 @@ fn collect_test_cases(dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, Box<dyn Err
     Ok(test_cases)
 }
 
+#[allow(dead_code)]
 fn measure_execution_time(executable: &Path, input_file: &Path) -> Result<u128, Box<dyn Error>> {
     let input_data = fs::read_to_string(input_file)?;
     let start = Instant::now();
@@ -98,7 +102,33 @@ fn return_results(
     test_cases: Vec<(PathBuf, PathBuf)>,
     executable: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    Ok(())
+    let mut all_successful = true;
+    for (input_file, expected_output_file) in test_cases {
+        let actual_output = get_execution_output(executable, &input_file)?;
+        let expected_output = fs::read_to_string(&expected_output_file)?;
+
+        match validate_output(&actual_output, &expected_output) {
+            Ok(_) => {
+                println!(
+                    "Test passed: Input: {:?}, Output: {:?}",
+                    input_file, expected_output_file
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "Test failed: Input: {:?}, Expected Output: {:?}\nError: {}",
+                    input_file, expected_output_file, error
+                );
+                all_successful = false;
+            }
+        }
+    }
+
+    if all_successful {
+        Ok(())
+    } else {
+        Err("Some tests failed.".into())
+    }
 }
 #[cfg(test)]
 mod test {
@@ -195,7 +225,7 @@ mod test {
 
         // post-process
         fs::remove_dir_all(test_dir).unwrap();
-        let executable_clear = Command::new("cargo")
+        let _executable_clear = Command::new("cargo")
             .arg("clean")
             .current_dir(test_dir)
             .status();
@@ -353,7 +383,7 @@ mod test {
 
     #[test]
     fn return_results_success() {
-        let executable = Path::new("./test_executable");
+        let executable = Path::new("./test_return_executable_success");
         let test_dir = "test_return_results";
         let input_file_path = format!("{}/sample_1.in", test_dir);
         let output_file_path = format!("{}/sample_1.out", test_dir);
@@ -362,7 +392,7 @@ mod test {
 
         std::fs::create_dir_all(test_dir).unwrap();
         std::fs::write(input_file, "test input").unwrap();
-        std::fs::write(output_file, "Test Output").unwrap();
+        std::fs::write(output_file, "Test Output\n").unwrap();
         std::fs::write(
             executable,
             r#"#!/bin/bash
@@ -386,7 +416,7 @@ mod test {
 
     #[test]
     fn return_results_failed() {
-        let executable = Path::new("./test_executable");
+        let executable = Path::new("./test_return_executable_failed");
         let test_dir = "test_return_results_failure";
         let input_file_path = format!("{}/sample_1.in", test_dir);
         let output_file_path = format!("{}/sample_1.out", test_dir);
@@ -394,7 +424,7 @@ mod test {
         let output_file = Path::new(&output_file_path);
         std::fs::create_dir_all(test_dir).unwrap();
         std::fs::write(input_file, "test input").unwrap();
-        std::fs::write(output_file, "Expected Output").unwrap();
+        std::fs::write(output_file, "Expected Output\n").unwrap();
         std::fs::write(
             executable,
             r#"#!/bin/bash
@@ -410,7 +440,7 @@ mod test {
 
         let test_cases = vec![(input_file.to_path_buf(), output_file.to_path_buf())];
         let result = return_results(test_cases, executable);
-        assert!(result.is_ok()); // 処理としてはエラーを返さない
+        assert!(result.is_err()); // 処理としてはエラーを返さない
 
         std::fs::remove_dir_all(test_dir).unwrap();
         std::fs::remove_file(executable).unwrap();

@@ -1,24 +1,46 @@
-// #[test]
+use std::fs;
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+#[test]
 fn test_integration_with_abc388_a() {
-    let input_path = "tests/data/abc388/a/sample_1.in";
-    let expected_output_path = "tests/data/abc388/a/sample_1.out";
+    let test_dir = "./tests/data/abc388";
+    let problem_name = "a";
+    let input_file = format!("{}/{}/tests/sample_1.in", test_dir, problem_name);
 
-    // テストケースを読み込む
-    let input = std::fs::read_to_string(input_path).expect("Failed to read input file");
-    let expected_output =
-        std::fs::read_to_string(expected_output_path).expect("Failed to read expected output file");
+    // サンプル入力を読み込む
+    let input_data = fs::read_to_string(&input_file).expect("Failed to read input file");
 
-    // `cargo atc test a` をシミュレーション
-    let output = std::process::Command::new("cargo")
+    // コマンドを実行
+    let output = Command::new("cargo")
         .arg("run")
-        .arg("--quiet")
-        .arg("--")
         .arg("test")
-        .arg("a")
-        .output()
-        .expect("Failed to execute test command");
+        .arg(problem_name)
+        .current_dir(test_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            // 標準入力にデータを送信
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(input_data.as_bytes())?;
+            }
+            child.wait_with_output()
+        })
+        .expect("Failed to execute command");
 
-    let actual_output = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(actual_output, expected_output, "Test case failed");
+    // デバッグ用ログ
+    println!("STDOUT:\n{}", stdout);
+    println!("STDERR:\n{}", stderr);
+
+    // 標準出力に 'Test passed' が含まれることを確認
+    assert!(
+        stdout.contains("Test passed"),
+        "Expected 'Test passed' in stdout, but got:\n{}",
+        stdout
+    );
 }

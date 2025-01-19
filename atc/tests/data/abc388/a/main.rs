@@ -4,6 +4,5 @@ fn main() {
     input! {
         s: Chars,
     }
-    print!("{}", s[0]);
-    println!("UPC");
+    println!("{}UPC", s[0]);
 }
