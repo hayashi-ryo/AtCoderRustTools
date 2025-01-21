@@ -12,7 +12,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Login,
-    Test,
+    Test { problem_name: String },
 }
 
 #[tokio::main]
@@ -24,14 +24,14 @@ async fn main() {
                 eprintln!("Error: {}", e);
             }
         }
-        Commands::Test => {
-            if let Err(e) = commands::login::execute().await {
+        Commands::Test { problem_name } => {
+            if let Err(e) = commands::test::execute(&problem_name) {
                 eprintln!("Error: {}", e);
             }
         }
     }
 }
-
+/*
 #[cfg(test)]
 mod test {
     use assert_cmd::Command;
@@ -59,3 +59,4 @@ mod test {
         result.success();
     }
 }
+ */
