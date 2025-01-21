@@ -3,6 +3,10 @@ name = "cargo-atc"
 version = "0.1.0"
 edition = "2021"
 
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=/usr/local/bin/mold"]
+
 [[bin]]
 name = "cargo-atc"
 path = "src/main.rs"
