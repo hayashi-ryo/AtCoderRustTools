@@ -1,19 +1,65 @@
-use std::error::Error;
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+//! テストケースの収集、資源のコンパイル、実行結果の検証、ユーザへの結果返却を行うモジュール
+//!
+//! このモジュールには以下の機能が含まれる。
+//! - テストケースの収集(`collect_test_cases)
+//! - テスト対象資源のコンパイル(`compile`)
+//! - テスト結果の検証(`validate_putput`)
+//! - 実行結果の標準出力キャプチャ(`get_execution_output`)
+//! - ユーザへの返却(`return_results`)
+//!
+//! このモジュールで処理対象となるディレクトリ構造は以下となる:
+//! .
+//! ├── Cargo.toml    : AtCoderに対応する依存関係を記録したファイル
+//! ├── Cargo.lock
+//! └── problem_name  : 入力として与える問題名
+//!     ├── main.rs   : 問題に回答するロジックを実装するファイル
+//!     └── tests     : AtCoderより取得したサンプル入出力を記録したディレクトリ
+//!         ├── sample_1.in
+//!         ├── sample_1.out    
+//!         ├── sample_2.in
+//!         └── sample_2.out
+use std::{
+    error::Error,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    time::Instant,
+};
 
+/// 問題名を基にテストケースの収集、資源のコンパイル、テスト結果の検証を実行する
+///
+/// # 引数
+///
+/// * `problem_name` - 処理対象となる問題名
 pub fn execute(problem_name: &str) -> Result<(), Box<dyn Error>> {
     let dir = find_problem_directory(problem_name)?;
+    let project_root = std::env::current_dir()?;
+    println!("PATH: {}", dir.display());
     compile(&dir)?;
+    println!(
+        "DEBUG: Compiled successfully for problem '{}'",
+        problem_name
+    );
     let test_cases = collect_test_cases(&dir)?;
-    let executable = dir.join("target/debug/test_project");
-    return_results(test_cases, &executable)?;
+    println!("DEBUG: Collected test cases: {:?}", test_cases);
+    let executable = project_root.join(format!("target/debug/{}", problem_name));
+    println!("DEBUG: Executable path is {}", executable.display());
+    return_results(
+        test_cases,
+        &project_root.join(format!("target/debug/{}", problem_name)),
+    )?;
     Ok(())
 }
 
+/// 指定された問題名に対応するディレクトリを探索する。
+///
+/// # 引数
+///
+/// * `problem_name` - 処理対象となる問題名
+/// # 戻り値
+///
+/// ディレクトリパスを返却する。
 fn find_problem_directory(problem_name: &str) -> Result<PathBuf, Box<dyn Error>> {
     let dir = Path::new(".").join(problem_name);
     if dir.exists() && dir.is_dir() {
@@ -23,6 +69,11 @@ fn find_problem_directory(problem_name: &str) -> Result<PathBuf, Box<dyn Error>>
     }
 }
 
+/// 指定されたディレクトリ内の資源んをコンパイルする
+///
+/// # 引数
+///
+/// * `dir` - コンパイル対象のディレクトリ。
 fn compile(dir: &Path) -> Result<(), Box<dyn Error>> {
     let compile_status = Command::new("cargo")
         .arg("build")
@@ -35,9 +86,26 @@ fn compile(dir: &Path) -> Result<(), Box<dyn Error>> {
     }
 }
 
+/// テストケースを収集する。
+///
+/// 指定されたディレクトリ内の`tests`サブディレクトリから、対応する`.in`と`.out`ファイルのペアを収集する。
+///
+/// # 引数
+///
+/// * `dir` - テストケースが格納されている問題ディレクトリ。
+///
+/// # 戻り値
+///
+/// 成功時は`.in`と`.out`ファイルのペアを格納したベクターを返却する。
+///
+/// # エラー
+///
+/// * `tests`ディレクトリが存在しない場合。
+/// * ファイルの読み込みに失敗した場合。
 fn collect_test_cases(dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, Box<dyn Error>> {
+    let tests_dir = dir.join("tests");
     let mut test_cases = Vec::new();
-    for entry in fs::read_dir(dir)? {
+    for entry in fs::read_dir(&tests_dir)? {
         let input_file_path = entry?.path();
         if input_file_path.extension().unwrap_or_default() == "in" {
             let output_file_path = input_file_path.with_extension("out");
@@ -71,10 +139,13 @@ fn measure_execution_time(executable: &Path, input_file: &Path) -> Result<u128, 
 
 fn get_execution_output(executable: &Path, input_file: &Path) -> Result<String, Box<dyn Error>> {
     let input_data = fs::read_to_string(input_file)?;
+    println!("PATH: {}", executable.display());
     let mut child = Command::new(executable)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()?;
+
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(input_data.as_bytes())?;
     }
@@ -87,6 +158,12 @@ fn get_execution_output(executable: &Path, input_file: &Path) -> Result<String, 
     Ok(output_str)
 }
 
+/// 実際の出力と期待される出力を比較する。
+///
+/// # 引数
+///
+/// * `actual` - 実際の出力データ。
+/// * `expected` - 期待される出力データ。
 fn validate_output(actual: &str, expected: &str) -> Result<(), String> {
     if actual == expected {
         Ok(())
@@ -106,7 +183,10 @@ fn return_results(
     for (input_file, expected_output_file) in test_cases {
         let actual_output = get_execution_output(executable, &input_file)?;
         let expected_output = fs::read_to_string(&expected_output_file)?;
-
+        println!(
+            "DEBUG: Calling validate_output with Actual: {:?}, Expected: {:?}",
+            actual_output, expected_output
+        );
         match validate_output(&actual_output, &expected_output) {
             Ok(_) => {
                 println!(
@@ -137,8 +217,9 @@ mod test {
 
     #[test]
     fn execute_success() {
+        // preparation
         let test_dir = "test_execute";
-        std::fs::create_dir_all(test_dir).unwrap();
+        std::fs::create_dir_all(format!("{}/tests", test_dir)).unwrap();
         std::fs::write(
             format!("{}/Cargo.toml", test_dir),
             r#"
@@ -146,6 +227,9 @@ mod test {
             name = "test_execute"
             version = "0.1.0"
             edition = "2021"
+            
+            [dependencies]
+            proconio = "0.4.5"
         "#,
         )
         .unwrap();
@@ -153,18 +237,34 @@ mod test {
         std::fs::write(
             format!("{}/src/main.rs", test_dir),
             r#"
-            fn main() {
-                println!("Hello, AtCoder!");
-            }
+                use proconio::{input, marker::Chars};
+
+                fn main() {
+                    input! {
+                        s1: String,
+                        s2: String
+                    }
+                    println!("{} {}", s1, s2);
+                }
         "#,
         )
         .unwrap();
-        std::fs::write(format!("{}/sample_1.in", test_dir), "input1").unwrap();
-        std::fs::write(format!("{}/sample_1.out", test_dir), "Hello, AtCoder!\n").unwrap();
+        std::fs::write(
+            format!("{}/tests/sample_1.in", test_dir),
+            "Hello, AtCoder!\n",
+        )
+        .unwrap();
+        std::fs::write(
+            format!("{}/tests/sample_1.out", test_dir),
+            "Hello, AtCoder!\n",
+        )
+        .unwrap();
 
+        // test
         let result = execute("test_execute");
         assert!(result.is_ok());
 
+        // post-process
         std::fs::remove_dir_all(test_dir).unwrap();
     }
     #[test]
@@ -270,9 +370,10 @@ mod test {
     #[test]
     fn collect_test_cases_success() {
         let test_dir = "collect_test_cases_success";
-        std::fs::create_dir_all(test_dir).unwrap();
-        std::fs::write(format!("{}/sample_1.in", test_dir), "input1").unwrap();
-        std::fs::write(format!("{}/sample_1.out", test_dir), "output1").unwrap();
+        //std::fs::create_dir_all(test_dir).unwrap();
+        std::fs::create_dir_all(format!("{}/tests", test_dir)).unwrap();
+        std::fs::write(format!("{}/tests/sample_1.in", test_dir), "input1").unwrap();
+        std::fs::write(format!("{}/tests/sample_1.out", test_dir), "output1").unwrap();
 
         let test_cases = collect_test_cases(Path::new(test_dir)).unwrap();
 
@@ -286,8 +387,8 @@ mod test {
     #[test]
     fn collect_test_cases_failed() {
         let test_dir = "collect_test_cases_failed";
-        std::fs::create_dir_all(test_dir).unwrap();
-        std::fs::write(format!("{}/sample_1.in", test_dir), "input1").unwrap();
+        std::fs::create_dir_all(format!("{}/tests", test_dir)).unwrap();
+        std::fs::write(format!("{}/tests/sample_1.in", test_dir), "input1").unwrap();
 
         let test_cases = collect_test_cases(Path::new(test_dir)).unwrap();
         assert_eq!(test_cases.len(), 0);
