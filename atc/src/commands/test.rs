@@ -3,7 +3,7 @@
 //! このモジュールには以下の機能が含まれる。
 //! - テストケースの収集(`collect_test_cases)
 //! - テスト対象資源のコンパイル(`compile`)
-//! - テスト結果の検証(`validate_putput`)
+//! - テスト対象バイナリファイルのパス取得(`get_execution_path`)
 //! - 実行結果の標準出力キャプチャ(`get_execution_output`)
 //! - ユーザへの返却(`return_results`)
 //!
@@ -18,8 +18,22 @@
 //!         ├── sample_1.out    
 //!         ├── sample_2.in
 //!         └── sample_2.out
+//!
+//! memo
+//! exexute
+//! 1. find_problem_directoryで問題格納ディレクトリの取得
+//! 2. compileでproblem_name/main.rsをコンパイル
+//! 3. collect_test_casesでテストケースを取得してvecに格納
+//! 4. timeout_settingsでcontest_nameのtimeout設定をhashmapとして取得
+//! 5. return_resultsでユーザに結果を返却
+//!     1. 実行ファイルの取得
+//!     2. テストケースごとに実行
+//!     3. resultvecに格納
+//! 6. ユーザに結果を返却
 use std::{
+    collections::HashMap,
     error::Error,
+    fmt::{Display, Formatter},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -27,29 +41,61 @@ use std::{
     time::Instant,
 };
 
+use toml::Value;
+
 /// 問題名を基にテストケースの収集、資源のコンパイル、テスト結果の検証を実行する
 ///
 /// # 引数
 ///
 /// * `problem_name` - 処理対象となる問題名
 pub fn execute(problem_name: &str) -> Result<(), Box<dyn Error>> {
-    let dir = find_problem_directory(problem_name)?;
     let project_root = std::env::current_dir()?;
-    println!("PATH: {}", dir.display());
+    let dir = find_problem_directory(problem_name)?;
     compile(&dir)?;
-    println!(
-        "DEBUG: Compiled successfully for problem '{}'",
-        problem_name
-    );
     let test_cases = collect_test_cases(&dir)?;
-    println!("DEBUG: Collected test cases: {:?}", test_cases);
-    let executable = project_root.join(format!("target/debug/{}", problem_name));
-    println!("DEBUG: Executable path is {}", executable.display());
-    return_results(
-        test_cases,
-        &project_root.join(format!("target/debug/{}", problem_name)),
-    )?;
+    let timeout_settings = load_problem_timeout_settings()?;
+    return_results(test_cases, problem_name, &timeout_settings)?;
     Ok(())
+}
+
+/// テストケースごとの実行結果を保持する構造体
+struct TestCaseResult {
+    test_case_name: String,        // サンプルケース名(例: "sample_1.in")
+    status: TestStatus,            // 実行結果
+    execution_time: u128,          // 実行時間(ミリ秒)
+    error_message: Option<String>, // エラーが発生した場合のメッセージ
+}
+
+impl TestCaseResult {
+    pub fn display_details(&self, input: &str, expected_output: &str, actual_output: &str) {
+        println!("Test Case: {}", self.test_case_name);
+        println!("Input:\n{}", input);
+        println!("Expected Output:\n{}", expected_output);
+        println!("Actual Output:\n{}", actual_output);
+        println!("Status: {}", self.status);
+        println!("Execution Time: {} ms\n", self.execution_time);
+    }
+}
+
+/// テストケースの実行結果ステータスを表す列挙型
+#[derive(PartialEq)]
+enum TestStatus {
+    AC,
+    WA,
+    TLE,
+    RE,
+}
+
+impl Display for TestStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let status = match self {
+            TestStatus::AC => "AC",
+            TestStatus::WA => "WA",
+            TestStatus::TLE => "TLE",
+            TestStatus::RE => "RE",
+        };
+        write!(f, "{}", status)
+    }
 }
 
 /// 指定された問題名に対応するディレクトリを探索する。
@@ -61,7 +107,7 @@ pub fn execute(problem_name: &str) -> Result<(), Box<dyn Error>> {
 ///
 /// ディレクトリパスを返却する。
 fn find_problem_directory(problem_name: &str) -> Result<PathBuf, Box<dyn Error>> {
-    let dir = Path::new(".").join(problem_name);
+    let dir = Path::new("./").join(problem_name);
     if dir.exists() && dir.is_dir() {
         Ok(dir)
     } else {
@@ -69,7 +115,7 @@ fn find_problem_directory(problem_name: &str) -> Result<PathBuf, Box<dyn Error>>
     }
 }
 
-/// 指定されたディレクトリ内の資源んをコンパイルする
+/// 指定されたディレクトリ内の資源をコンパイルする
 ///
 /// # 引数
 ///
@@ -119,101 +165,144 @@ fn collect_test_cases(dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, Box<dyn Err
     Ok(test_cases)
 }
 
-#[allow(dead_code)]
-fn measure_execution_time(executable: &Path, input_file: &Path) -> Result<u128, Box<dyn Error>> {
-    let input_data = fs::read_to_string(input_file)?;
-    let start = Instant::now();
-    let mut child = Command::new(executable)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin.write_all(input_data.as_bytes())?;
-    }
-
-    child.wait()?;
-    let duration = start.elapsed().as_millis();
-    Ok(duration)
-}
-
-fn get_execution_output(executable: &Path, input_file: &Path) -> Result<String, Box<dyn Error>> {
-    let input_data = fs::read_to_string(input_file)?;
-    println!("PATH: {}", executable.display());
-    let mut child = Command::new(executable)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input_data.as_bytes())?;
-    }
-    let output = child.wait_with_output()?.stdout;
-    let mut output_str = String::from_utf8_lossy(&output).to_string();
-    if !output_str.ends_with('\n') {
-        output_str.push('\n');
-    }
-
-    Ok(output_str)
-}
-
-/// 実際の出力と期待される出力を比較する。
+/// 問題名に基づいて実行可能ファイルのパスを取得する関数
 ///
 /// # 引数
 ///
-/// * `actual` - 実際の出力データ。
-/// * `expected` - 期待される出力データ。
-fn validate_output(actual: &str, expected: &str) -> Result<(), String> {
-    if actual == expected {
-        Ok(())
+/// * `problem_name` - 処理対象となる問題名
+///
+/// # 戻り値
+///
+/// 実行可能ファイルのパスを返す。
+fn get_execution_path(problem_name: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let project_root = std::env::current_dir()?;
+    let executable = project_root.join(format!("target/debug/{}", problem_name));
+    if executable.exists() {
+        Ok(executable)
     } else {
         Err(format!(
-            "Output mismatch:\nExpected:\n{}\nActual:\n{}",
-            expected, actual
-        ))
+            "Executable for problem '{}' not found at {:?}",
+            problem_name, executable
+        )
+        .into())
     }
+}
+
+/// Cargo.tomlから問題ごとのタイムアウト設定を取得する。
+fn load_problem_timeout_settings() -> Result<HashMap<String, u64>, Box<dyn Error>> {
+    let cargo_toml_path = Path::new("Cargo.toml");
+    if !cargo_toml_path.exists() {
+        return Err("Cargo.toml not found in the current directory".into());
+    }
+
+    let cargo_toml_content = fs::read_to_string(cargo_toml_path)?;
+    let parsed: Value = toml::from_str(&cargo_toml_content)?;
+
+    let timeout_section = parsed
+        .get("package")
+        .and_then(|pkg| pkg.get("metadata"))
+        .and_then(|meta| meta.get("timeout"))
+        .ok_or("Timeout section not found in Cargo.toml")?;
+
+    let mut timeout_map = HashMap::new();
+    if let Value::Table(table) = timeout_section {
+        for (key, value) in table {
+            if let Some(timeout) = value.as_integer() {
+                timeout_map.insert(key.clone(), timeout as u64);
+            }
+        }
+    } else {
+        return Err("Timeout section is not a table".into());
+    }
+
+    Ok(timeout_map)
 }
 
 fn return_results(
     test_cases: Vec<(PathBuf, PathBuf)>,
-    executable: &Path,
+    problem_name: &str,
+    timeout_settings: &HashMap<String, u64>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut all_successful = true;
-    for (input_file, expected_output_file) in test_cases {
-        let actual_output = get_execution_output(executable, &input_file)?;
-        let expected_output = fs::read_to_string(&expected_output_file)?;
-        println!(
-            "DEBUG: Calling validate_output with Actual: {:?}, Expected: {:?}",
-            actual_output, expected_output
-        );
-        match validate_output(&actual_output, &expected_output) {
-            Ok(_) => {
-                println!(
-                    "Test passed: Input: {:?}, Output: {:?}",
-                    input_file, expected_output_file
-                );
-            }
-            Err(error) => {
-                eprintln!(
-                    "Test failed: Input: {:?}, Expected Output: {:?}\nError: {}",
-                    input_file, expected_output_file, error
-                );
-                all_successful = false;
-            }
-        }
-    }
+    // 実行可能ファイルのパスを取得
+    let executable = get_execution_path(problem_name)?;
 
-    if all_successful {
+    let mut results = Vec::new();
+
+    for (input_file, expected_output_file) in test_cases {
+        let input = fs::read_to_string(&input_file)?;
+        let expected_output = fs::read_to_string(&expected_output_file)?;
+        let test_case_name = input_file
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let timeout = timeout_settings
+            .get(&test_case_name)
+            .copied()
+            .unwrap_or(2000); // デフォルト 2000ms
+
+        let start_time = Instant::now();
+        let execution_result = Command::new(&executable)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .and_then(|mut child| {
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(input.as_bytes())?;
+                }
+                child.wait_with_output()
+            });
+
+        let execution_time = start_time.elapsed().as_millis();
+        let (actual_output, status, error_message) = match execution_result {
+            Ok(output) => {
+                let actual_output = String::from_utf8_lossy(&output.stdout).to_string();
+                if execution_time > timeout as u128 {
+                    (actual_output, TestStatus::TLE, None)
+                } else if actual_output.trim() == expected_output.trim() {
+                    (actual_output, TestStatus::AC, None)
+                } else {
+                    (actual_output, TestStatus::WA, None)
+                }
+            }
+            Err(err) => ("".to_string(), TestStatus::RE, Some(err.to_string())),
+        };
+
+        results.push(TestCaseResult {
+            test_case_name,
+            status,
+            execution_time,
+            error_message,
+        });
+
+        results
+            .last()
+            .unwrap()
+            .display_details(&input, &expected_output, &actual_output);
+    }
+    println!("\n=== Test Results Summary ===");
+    for result in &results {
+        println!(
+            "{}: Status = {}, Time = {} ms",
+            result.test_case_name, result.status, result.execution_time
+        );
+    }
+    println!("=============================\n");
+
+    if results.iter().all(|res| res.status == TestStatus::AC) {
         Ok(())
     } else {
         Err("Some tests failed.".into())
     }
 }
+
 #[cfg(test)]
 mod test {
     use super::*;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn execute_success() {
@@ -267,20 +356,24 @@ mod test {
         // post-process
         std::fs::remove_dir_all(test_dir).unwrap();
     }
+
     #[test]
     fn find_problem_directory_success() {
         // preparation
-        let unit_test_dir = "unit_test";
-        fs::create_dir_all(unit_test_dir).unwrap();
+        let temp_dir = TempDir::new_in(".").expect("Error");
+        let dir_name = temp_dir
+            .path()
+            .file_name()
+            .expect("")
+            .to_string_lossy()
+            .to_string();
 
         // test
-        let result = find_problem_directory(unit_test_dir);
+        let result = find_problem_directory(&dir_name);
+        println!("PATH: {}", dir_name);
         assert!(result.is_ok());
         let path = result.unwrap();
-        assert_eq!(path.to_str().unwrap(), format!("./{}", "unit_test"));
-
-        // post-process
-        fs::remove_dir(unit_test_dir).unwrap();
+        assert_eq!(path.to_str().unwrap(), format!("./{}", dir_name));
     }
 
     #[test]
@@ -296,10 +389,9 @@ mod test {
     #[test]
     fn compile_success() {
         // preparation
-        let test_dir = Path::new("test_project_success");
-        fs::create_dir(test_dir).unwrap();
+        let temp_dir = TempDir::new_in(".").expect("Error");
         fs::write(
-            test_dir.join("Cargo.toml"),
+            temp_dir.path().join("Cargo.toml"),
             r#"
             [package]
             name = "test_project_success"
@@ -308,9 +400,9 @@ mod test {
             "#,
         )
         .unwrap();
-        fs::create_dir(test_dir.join("src")).unwrap();
+        fs::create_dir(temp_dir.path().join("src")).unwrap();
         fs::write(
-            test_dir.join("src/main.rs"),
+            temp_dir.path().join("src/main.rs"),
             r#"
             fn main() {
                 println!("Hello, world!");
@@ -320,24 +412,16 @@ mod test {
         .unwrap();
 
         // test
-        let result = compile(test_dir);
+        let result = compile(temp_dir.path());
         assert!(result.is_ok());
-
-        // post-process
-        fs::remove_dir_all(test_dir).unwrap();
-        let _executable_clear = Command::new("cargo")
-            .arg("clean")
-            .current_dir(test_dir)
-            .status();
     }
 
     #[test]
     fn compile_failed() {
         // preparation
-        let test_dir = Path::new("test_project_failure");
-        fs::create_dir(test_dir).unwrap();
+        let temp_dir = TempDir::new_in(".").expect("Error");
         fs::write(
-            test_dir.join("Cargo.toml"),
+            temp_dir.path().join("Cargo.toml"),
             r#"
             [package]
             name = "test_project_failure"
@@ -346,9 +430,9 @@ mod test {
             "#,
         )
         .unwrap();
-        fs::create_dir(test_dir.join("src")).unwrap();
+        fs::create_dir(temp_dir.path().join("src")).unwrap();
         fs::write(
-            test_dir.join("src/main.rs"),
+            temp_dir.path().join("src/main.rs"),
             r#"
             fn main() {
                 compile_error!("This is a test error.");
@@ -358,192 +442,84 @@ mod test {
         .unwrap();
 
         // test
-        let result = compile(test_dir);
+        let result = compile(temp_dir.path());
         assert!(result.is_err());
         let error_message = result.unwrap_err().to_string();
         assert!(error_message.contains("Compilation failed"));
-
-        // post-process
-        fs::remove_dir_all(test_dir).unwrap();
     }
 
     #[test]
     fn collect_test_cases_success() {
-        let test_dir = "collect_test_cases_success";
+        let temp_dir = TempDir::new_in(".").expect("Error");
         //std::fs::create_dir_all(test_dir).unwrap();
-        std::fs::create_dir_all(format!("{}/tests", test_dir)).unwrap();
-        std::fs::write(format!("{}/tests/sample_1.in", test_dir), "input1").unwrap();
-        std::fs::write(format!("{}/tests/sample_1.out", test_dir), "output1").unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("tests")).unwrap();
+        std::fs::write(temp_dir.path().join("tests/sample_1.in"), "input1").unwrap();
+        std::fs::write(temp_dir.path().join("tests/sample_1.out"), "output1").unwrap();
 
-        let test_cases = collect_test_cases(Path::new(test_dir)).unwrap();
+        let test_cases = collect_test_cases(temp_dir.path()).unwrap();
 
         assert_eq!(test_cases.len(), 1);
         assert_eq!(test_cases[0].0.ends_with("sample_1.in"), true);
         assert_eq!(test_cases[0].1.ends_with("sample_1.out"), true);
-
-        std::fs::remove_dir_all(test_dir).unwrap();
     }
 
     #[test]
     fn collect_test_cases_failed() {
-        let test_dir = "collect_test_cases_failed";
-        std::fs::create_dir_all(format!("{}/tests", test_dir)).unwrap();
-        std::fs::write(format!("{}/tests/sample_1.in", test_dir), "input1").unwrap();
+        let temp_dir = TempDir::new_in(".").expect("Error");
+        std::fs::create_dir_all(temp_dir.path().join("tests")).unwrap();
+        std::fs::write(temp_dir.path().join("tests/sample_1.in"), "input1").unwrap();
 
-        let test_cases = collect_test_cases(Path::new(test_dir)).unwrap();
+        let test_cases = collect_test_cases(temp_dir.path()).unwrap();
         assert_eq!(test_cases.len(), 0);
-
-        std::fs::remove_dir_all(test_dir).unwrap();
     }
 
     #[test]
-    fn measure_execution_time_success() {
-        let executable_meacure_time = Path::new("./test_executable_meacure_time");
-        let input_file = "test_input_1.in";
-        std::fs::write(input_file, "test input").unwrap();
-        std::fs::write(
-            executable_meacure_time,
-            r#"#!/bin/bash
-            echo "Hello"
-            "#,
-        )
-        .unwrap();
+    fn load_problem_timeout_settings_success() {
+        // テスト向けファイルの準備
+        let temp_dir = TempDir::new_in(".").expect("Error");
+        let cargo_toml_content = r#"        
+        [package]
+        name = "test_project"
+        version = "0.1.0"
+        edition = "2021"
 
-        std::process::Command::new("chmod")
-            .arg("+x")
-            .arg(executable_meacure_time)
-            .status()
-            .unwrap();
+        [package.metadata.timeout]
+        a = 2000
+        b = 4000
+        "#;
 
-        let duration =
-            measure_execution_time(executable_meacure_time, Path::new(input_file)).unwrap();
-        assert!(duration > 0);
+        std::fs::create_dir_all(temp_dir.path()).unwrap();
+        std::env::set_current_dir(&temp_dir.path()).unwrap();
+        fs::write("Cargo.toml", cargo_toml_content).unwrap();
 
-        std::fs::remove_file(input_file).unwrap();
-        std::fs::remove_file(executable_meacure_time).unwrap();
+        // テスト
+
+        let timeout_settings = load_problem_timeout_settings().unwrap();
+        assert_eq!(timeout_settings.get("a"), Some(&2000));
+        assert_eq!(timeout_settings.get("b"), Some(&4000));
     }
 
     #[test]
-    fn measure_execution_time_failed() {
-        let result = measure_execution_time(
-            Path::new("non_existent_executable"),
-            Path::new("test_input.in"),
-        );
-        assert!(result.is_err());
-    }
+    fn load_problem_timeout_settings_failed() {
+        // テスト向けファイルの準備
+        let temp_dir = TempDir::new_in(".").expect("Error");
+        let cargo_toml_content = r#"        
+        [package]
+        name = "test_project"
+        version = "0.1.0"
+        edition = "2021"
 
-    #[test]
-    fn get_execution_output_success() {
-        let executable_get_output = Path::new("./test_executable_get_output");
-        let input_file = "test_input.in";
-        let input_content = "test input data\n";
-        std::fs::write(input_file, input_content).unwrap();
-        if executable_get_output.exists() {
-            std::fs::remove_file(executable_get_output).unwrap();
-        }
-        std::fs::write(
-            executable_get_output,
-            r#"#!/bin/bash
-            cat
-            "#, // 標準入力をそのまま標準出力に返す
-        )
-        .unwrap();
-        std::process::Command::new("chmod")
-            .arg("+x")
-            .arg(executable_get_output)
-            .status()
-            .unwrap();
+        [package.metadata.timeout]
+        a = 2000
+        b = 4000
+        "#;
+        std::fs::create_dir_all(temp_dir.path()).unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+        fs::write("Cargo.toml", cargo_toml_content).unwrap();
 
-        let output = get_execution_output(executable_get_output, Path::new(input_file)).unwrap();
-        assert_eq!(output, input_content);
-        std::fs::remove_file(input_file).unwrap();
-        std::fs::remove_file(executable_get_output).unwrap();
-    }
+        // テスト
 
-    #[test]
-    fn get_execution_output_failed() {
-        let result = get_execution_output(
-            Path::new("non_existent_executable"),
-            Path::new("test_input.in"),
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn validate_output_success() {
-        let result = validate_output("expected output\n", "expected output\n");
-        assert!(result.is_ok());
-    }
-    #[test]
-    fn validate_output_failed() {
-        let result = validate_output("expected output\n", "actual output\n");
-        assert!(result.is_err());
-        let error_message = result.unwrap_err();
-        assert!(error_message.contains("Output mismatch"));
-    }
-
-    #[test]
-    fn return_results_success() {
-        let executable = Path::new("./test_return_executable_success");
-        let test_dir = "test_return_results";
-        let input_file_path = format!("{}/sample_1.in", test_dir);
-        let output_file_path = format!("{}/sample_1.out", test_dir);
-        let input_file = Path::new(&input_file_path); // ここで借用元を明示
-        let output_file = Path::new(&output_file_path);
-
-        std::fs::create_dir_all(test_dir).unwrap();
-        std::fs::write(input_file, "test input").unwrap();
-        std::fs::write(output_file, "Test Output\n").unwrap();
-        std::fs::write(
-            executable,
-            r#"#!/bin/bash
-            echo "Test Output"
-            "#,
-        )
-        .unwrap();
-        std::process::Command::new("chmod")
-            .arg("+x")
-            .arg(executable)
-            .status()
-            .unwrap();
-
-        let test_cases = vec![(input_file.to_path_buf(), output_file.to_path_buf())];
-        let result = return_results(test_cases, executable);
-        assert!(result.is_ok());
-
-        std::fs::remove_dir_all(test_dir).unwrap();
-        std::fs::remove_file(executable).unwrap();
-    }
-
-    #[test]
-    fn return_results_failed() {
-        let executable = Path::new("./test_return_executable_failed");
-        let test_dir = "test_return_results_failure";
-        let input_file_path = format!("{}/sample_1.in", test_dir);
-        let output_file_path = format!("{}/sample_1.out", test_dir);
-        let input_file = Path::new(&input_file_path); // ここで借用元を明示
-        let output_file = Path::new(&output_file_path);
-        std::fs::create_dir_all(test_dir).unwrap();
-        std::fs::write(input_file, "test input").unwrap();
-        std::fs::write(output_file, "Expected Output\n").unwrap();
-        std::fs::write(
-            executable,
-            r#"#!/bin/bash
-        echo "Actual Output"
-        "#,
-        )
-        .unwrap();
-        std::process::Command::new("chmod")
-            .arg("+x")
-            .arg(executable)
-            .status()
-            .unwrap();
-
-        let test_cases = vec![(input_file.to_path_buf(), output_file.to_path_buf())];
-        let result = return_results(test_cases, executable);
-        assert!(result.is_err()); // 処理としてはエラーを返さない
-
-        std::fs::remove_dir_all(test_dir).unwrap();
-        std::fs::remove_file(executable).unwrap();
+        let timeout_settings = load_problem_timeout_settings().unwrap();
+        assert!(timeout_settings.get("c").is_none());
     }
 }
