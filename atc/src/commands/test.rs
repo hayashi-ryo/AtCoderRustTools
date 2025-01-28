@@ -4,8 +4,7 @@
 //! - テストケースの収集(`collect_test_cases)
 //! - テスト対象資源のコンパイル(`compile`)
 //! - テスト対象バイナリファイルのパス取得(`get_execution_path`)
-//! - 実行結果の標準出力キャプチャ(`get_execution_output`)
-//! - ユーザへの返却(`return_results`)
+//! - テストケースごとの実行結果の取得(`return_results`)
 //!
 //! このモジュールで処理対象となるディレクトリ構造は以下となる:
 //! .
@@ -49,13 +48,30 @@ use toml::Value;
 ///
 /// * `problem_name` - 処理対象となる問題名
 pub fn execute(problem_name: &str) -> Result<(), Box<dyn Error>> {
-    let project_root = std::env::current_dir()?;
+    let _project_root = std::env::current_dir()?;
     let dir = find_problem_directory(problem_name)?;
     compile(&dir)?;
     let test_cases = collect_test_cases(&dir)?;
     let timeout_settings = load_problem_timeout_settings()?;
-    return_results(test_cases, problem_name, &timeout_settings)?;
-    Ok(())
+    let results = return_results(test_cases, problem_name, &timeout_settings).unwrap();
+
+    println!("\n=== Test Results Summary ===");
+    for result in &results {
+        println!(
+            "{}: Status = {:?}, Time = {} ms",
+            result.test_case_name, result.status, result.execution_time
+        );
+        if let Some(error) = &result.error_message {
+            println!("  Error: {}", error);
+        }
+    }
+    println!("=============================\n");
+
+    if results.iter().all(|res| res.status == TestStatus::AC) {
+        Ok(())
+    } else {
+        Err("Some tests failed.".into())
+    }
 }
 
 /// テストケースごとの実行結果を保持する構造体
@@ -78,7 +94,7 @@ impl TestCaseResult {
 }
 
 /// テストケースの実行結果ステータスを表す列挙型
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum TestStatus {
     AC,
     WA,
@@ -222,11 +238,14 @@ fn return_results(
     test_cases: Vec<(PathBuf, PathBuf)>,
     problem_name: &str,
     timeout_settings: &HashMap<String, u64>,
-) -> Result<(), Box<dyn Error>> {
-    // 実行可能ファイルのパスを取得
+) -> Result<Vec<TestCaseResult>, Box<dyn Error>> {
     let executable = get_execution_path(problem_name)?;
-
     let mut results = Vec::new();
+    let timeout = timeout_settings.get(problem_name).copied().unwrap();
+    if !executable.exists() {
+        println!("DEBUG: {}", executable.display());
+        return Err(format!("Executable does not exist: {}", executable.display()).into());
+    }
 
     for (input_file, expected_output_file) in test_cases {
         let input = fs::read_to_string(&input_file)?;
@@ -237,24 +256,37 @@ fn return_results(
             .to_string_lossy()
             .to_string();
 
-        let timeout = timeout_settings
-            .get(&test_case_name)
-            .copied()
-            .unwrap_or(2000); // デフォルト 2000ms
-
         let start_time = Instant::now();
-        let execution_result = Command::new(&executable)
+        let mut child = Command::new(&executable)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .spawn()
-            .and_then(|mut child| {
-                if let Some(mut stdin) = child.stdin.take() {
-                    stdin.write_all(input.as_bytes())?;
-                }
-                child.wait_with_output()
-            });
+            .spawn()?;
+        println!("DEBUG: {}", executable.display());
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input.as_bytes())?;
+        }
 
+        let execution_result: Result<std::process::Output, Box<dyn Error>> = loop {
+            if start_time.elapsed().as_millis() > timeout as u128 {
+                // TLE
+                let _ = child.kill();
+                break Err("Execution timed out".into());
+            }
+            match child.try_wait()? {
+                Some(status) => {
+                    if status.success() {
+                        let output = child.wait_with_output()?;
+                        break Ok(output);
+                    } else {
+                        break Err("Execution failed".into());
+                    }
+                }
+                None => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        };
         let execution_time = start_time.elapsed().as_millis();
         let (actual_output, status, error_message) = match execution_result {
             Ok(output) => {
@@ -282,26 +314,17 @@ fn return_results(
             .unwrap()
             .display_details(&input, &expected_output, &actual_output);
     }
-    println!("\n=== Test Results Summary ===");
-    for result in &results {
-        println!(
-            "{}: Status = {}, Time = {} ms",
-            result.test_case_name, result.status, result.execution_time
-        );
-    }
-    println!("=============================\n");
-
-    if results.iter().all(|res| res.status == TestStatus::AC) {
-        Ok(())
-    } else {
-        Err("Some tests failed.".into())
-    }
+    Ok(results)
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::fs;
+    use std::{
+        fs,
+        io::{self, Write},
+        path::Path,
+    };
     use tempfile::TempDir;
 
     #[test]
@@ -521,5 +544,96 @@ mod test {
 
         let timeout_settings = load_problem_timeout_settings().unwrap();
         assert!(timeout_settings.get("c").is_none());
+    }
+
+    /// テスト環境構築
+    fn setup_test_environment(
+        test_cases: Vec<(&str, &str, &str)>,
+        problem_name: &str,
+        timeout: u64,
+    ) -> HashMap<String, u64> {
+        let problem_dir = Path::new(problem_name);
+        let cargo_toml_content = format!(
+            r#"
+        [package]
+        name = "test_execute"
+        version = "0.1.0"
+        edition = "2021"
+
+        [[bin]]
+        name = "{}"
+        path = "{}/main.rs"
+
+        [dependencies]
+        proconio = "0.4.5"
+    "#,
+            problem_name, problem_name
+        );
+
+        // プロジェクト構成を作成
+        fs::create_dir_all(problem_dir.join("test_ac")).unwrap();
+        fs::write("Cargo.toml", cargo_toml_content).unwrap();
+        fs::write(
+            problem_dir.join("main.rs"),
+            r#"
+            use proconio::input;
+            fn main() {
+                input! {
+                    a: i32,
+                    b: i32,
+                }
+                println!("{}", a + b);
+            }
+        "#,
+        )
+        .unwrap();
+
+        // テストケース作成
+        fs::create_dir_all(problem_dir.join("tests")).unwrap();
+        for (input_name, input_content, output_content) in test_cases {
+            fs::write(problem_dir.join("tests").join(input_name), input_content).unwrap();
+            let output_name = input_name.replace(".in", ".out");
+            fs::write(problem_dir.join("tests").join(output_name), output_content).unwrap();
+        }
+
+        // タイムアウト設定を返却
+        let mut timeout_settings = HashMap::new();
+        timeout_settings.insert(problem_name.to_string(), timeout);
+        timeout_settings
+    }
+
+    /// テスト環境削除
+    fn cleanup_test_environment(problem_name: &str) {
+        let problem_dir = Path::new(problem_name);
+        if problem_dir.exists() {
+            fs::remove_dir_all(problem_dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn return_results_ac() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        // テスト環境をセットアップ
+        let problem_name = "test_ac";
+        let timeout_settings =
+            setup_test_environment(vec![("sample_1.in", "1 2\n", "3\n")], problem_name, 2000);
+
+        // テストケース収集
+        let test_cases = collect_test_cases(Path::new(problem_name)).unwrap();
+
+        // プロジェクトをコンパイル
+        let _ = compile(&temp_dir.path());
+
+        // テスト結果を確認
+        let results = return_results(test_cases, problem_name, &timeout_settings);
+        assert!(results.is_ok());
+        let results = results.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, TestStatus::AC);
+
+        // 環境をクリーンアップ
+        cleanup_test_environment(problem_name);
     }
 }
