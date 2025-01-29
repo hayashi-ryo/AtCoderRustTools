@@ -291,15 +291,19 @@ fn return_results(
         let (actual_output, status, error_message) = match execution_result {
             Ok(output) => {
                 let actual_output = String::from_utf8_lossy(&output.stdout).to_string();
-                if execution_time > timeout as u128 {
-                    (actual_output, TestStatus::TLE, None)
-                } else if actual_output.trim() == expected_output.trim() {
+                if actual_output.trim() == expected_output.trim() {
                     (actual_output, TestStatus::AC, None)
                 } else {
                     (actual_output, TestStatus::WA, None)
                 }
             }
-            Err(err) => ("".to_string(), TestStatus::RE, Some(err.to_string())),
+            Err(err) => {
+                if execution_time > timeout as u128 {
+                    ("".to_string(), TestStatus::TLE, None)
+                } else {
+                    ("".to_string(), TestStatus::RE, Some(err.to_string()))
+                }
+            }
         };
 
         results.push(TestCaseResult {
@@ -320,65 +324,9 @@ fn return_results(
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::{
-        fs,
-        io::{self, Write},
-        path::Path,
-    };
+    use serial_test::serial;
+    use std::{fs, path::Path};
     use tempfile::TempDir;
-
-    #[test]
-    fn execute_success() {
-        // preparation
-        let test_dir = "test_execute";
-        std::fs::create_dir_all(format!("{}/tests", test_dir)).unwrap();
-        std::fs::write(
-            format!("{}/Cargo.toml", test_dir),
-            r#"
-            [package]
-            name = "test_execute"
-            version = "0.1.0"
-            edition = "2021"
-            
-            [dependencies]
-            proconio = "0.4.5"
-        "#,
-        )
-        .unwrap();
-        std::fs::create_dir_all(format!("{}/src", test_dir)).unwrap();
-        std::fs::write(
-            format!("{}/src/main.rs", test_dir),
-            r#"
-                use proconio::{input, marker::Chars};
-
-                fn main() {
-                    input! {
-                        s1: String,
-                        s2: String
-                    }
-                    println!("{} {}", s1, s2);
-                }
-        "#,
-        )
-        .unwrap();
-        std::fs::write(
-            format!("{}/tests/sample_1.in", test_dir),
-            "Hello, AtCoder!\n",
-        )
-        .unwrap();
-        std::fs::write(
-            format!("{}/tests/sample_1.out", test_dir),
-            "Hello, AtCoder!\n",
-        )
-        .unwrap();
-
-        // test
-        let result = execute("test_execute");
-        assert!(result.is_ok());
-
-        // post-process
-        std::fs::remove_dir_all(test_dir).unwrap();
-    }
 
     #[test]
     fn find_problem_directory_success() {
@@ -497,9 +445,11 @@ mod test {
     }
 
     #[test]
+    #[serial]
     fn load_problem_timeout_settings_success() {
         // テスト向けファイルの準備
-        let temp_dir = TempDir::new_in(".").expect("Error");
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        std::env::set_current_dir(&temp_dir).unwrap();
         let cargo_toml_content = r#"        
         [package]
         name = "test_project"
@@ -523,9 +473,11 @@ mod test {
     }
 
     #[test]
+    #[serial]
     fn load_problem_timeout_settings_failed() {
         // テスト向けファイルの準備
-        let temp_dir = TempDir::new_in(".").expect("Error");
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        std::env::set_current_dir(&temp_dir).unwrap();
         let cargo_toml_content = r#"        
         [package]
         name = "test_project"
@@ -556,7 +508,7 @@ mod test {
         let cargo_toml_content = format!(
             r#"
         [package]
-        name = "test_execute"
+        name = "{}"
         version = "0.1.0"
         edition = "2021"
 
@@ -567,11 +519,11 @@ mod test {
         [dependencies]
         proconio = "0.4.5"
     "#,
-            problem_name, problem_name
+            problem_name, problem_name, problem_name
         );
 
         // プロジェクト構成を作成
-        fs::create_dir_all(problem_dir.join("test_ac")).unwrap();
+        fs::create_dir_all(problem_dir.join(problem_name)).unwrap();
         fs::write("Cargo.toml", cargo_toml_content).unwrap();
         fs::write(
             problem_dir.join("main.rs"),
@@ -582,7 +534,7 @@ mod test {
                     a: i32,
                     b: i32,
                 }
-                println!("{}", a + b);
+                println!("{}", a / b);
             }
         "#,
         )
@@ -611,6 +563,7 @@ mod test {
     }
 
     #[test]
+    #[serial]
     fn return_results_ac() {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         std::env::set_current_dir(&temp_dir).unwrap();
@@ -618,7 +571,7 @@ mod test {
         // テスト環境をセットアップ
         let problem_name = "test_ac";
         let timeout_settings =
-            setup_test_environment(vec![("sample_1.in", "1 2\n", "3\n")], problem_name, 2000);
+            setup_test_environment(vec![("sample_1.in", "4 2\n", "2\n")], problem_name, 2000);
 
         // テストケース収集
         let test_cases = collect_test_cases(Path::new(problem_name)).unwrap();
@@ -632,6 +585,90 @@ mod test {
         let results = results.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, TestStatus::AC);
+
+        // 環境をクリーンアップ
+        cleanup_test_environment(problem_name);
+    }
+
+    #[test]
+    #[serial]
+    fn return_results_wa() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        // テスト環境をセットアップ
+        let problem_name = "test_wa";
+        let timeout_settings =
+            setup_test_environment(vec![("sample_1.in", "4 2\n", "0\n")], problem_name, 2000);
+
+        // テストケース収集
+        let test_cases = collect_test_cases(Path::new(problem_name)).unwrap();
+
+        // プロジェクトをコンパイル
+        let _ = compile(&temp_dir.path());
+
+        // テスト結果を確認
+        let results = return_results(test_cases, problem_name, &timeout_settings);
+        assert!(results.is_ok());
+        let results = results.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, TestStatus::WA);
+
+        // 環境をクリーンアップ
+        cleanup_test_environment(problem_name);
+    }
+
+    #[test]
+    #[serial]
+    fn return_results_tle() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        // テスト環境をセットアップ
+        let problem_name = "test_tle";
+        let timeout_settings =
+            setup_test_environment(vec![("sample_1.in", "4 2\n", "2\n")], problem_name, 5);
+
+        // テストケース収集
+        let test_cases = collect_test_cases(Path::new(problem_name)).unwrap();
+
+        // プロジェクトをコンパイル
+        let _ = compile(&temp_dir.path());
+
+        // テスト結果を確認
+        let results = return_results(test_cases, problem_name, &timeout_settings);
+        assert!(results.is_ok());
+        let results = results.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, TestStatus::TLE);
+
+        // 環境をクリーンアップ
+        cleanup_test_environment(problem_name);
+    }
+
+    #[test]
+    #[serial]
+    fn return_results_re() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        // テスト環境をセットアップ
+        let problem_name = "test_re";
+        let timeout_settings =
+            setup_test_environment(vec![("sample_1.in", "4 0\n", "2\n")], problem_name, 2000);
+
+        // テストケース収集
+        let test_cases = collect_test_cases(Path::new(problem_name)).unwrap();
+
+        // プロジェクトをコンパイル
+        let _ = compile(&temp_dir.path());
+
+        // テスト結果を確認
+        let results = return_results(test_cases, problem_name, &timeout_settings);
+        assert!(results.is_ok());
+        let results = results.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, TestStatus::RE);
 
         // 環境をクリーンアップ
         cleanup_test_environment(problem_name);
