@@ -7,6 +7,10 @@ edition = "2018"
 name = "${RROBLEM_NAME}"
 path = "${RROBLEM_NAME}/main.rs"
 
+[package.metadata.timeout]
+"${RROBLEM_NAME}" = 2000
+
+
 [dependencies]
 ac-library-rs = "0.1.1"
 once_cell = "1.18.0"
