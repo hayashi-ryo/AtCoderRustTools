@@ -13,6 +13,7 @@ struct Cli {
 enum Commands {
     Login,
     Test { problem_name: String },
+    Download { contest_name: String },
 }
 
 #[tokio::main]
@@ -26,6 +27,12 @@ async fn main() {
         }
         Commands::Test { problem_name } => {
             if let Err(e) = commands::test::execute(&problem_name) {
+                eprintln!("Error: {}", e);
+            }
+        }
+        Commands::Download { contest_name } => {
+            println!("DEBUG0");
+            if let Err(e) = commands::download::execute(&contest_name).await {
                 eprintln!("Error: {}", e);
             }
         }
