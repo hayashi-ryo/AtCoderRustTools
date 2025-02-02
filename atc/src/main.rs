@@ -31,7 +31,8 @@ async fn main() {
             }
         }
         Commands::Download { contest_name } => {
-            if let Err(e) = commands::test::execute(&contest_name) {
+            println!("DEBUG0");
+            if let Err(e) = commands::download::execute(&contest_name).await {
                 eprintln!("Error: {}", e);
             }
         }

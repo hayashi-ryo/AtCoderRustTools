@@ -12,9 +12,35 @@
 
 use scraper::{ElementRef, Html, Selector};
 use std::error::Error;
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 
-pub fn execute(contest_name: &str) -> Result<(), Box<dyn Error>> {
-    let base_url = "https://atcoder.jp/";
+pub async fn execute(contest_name: &str) -> Result<(), Box<dyn Error>> {
+    let base_url = "https://atcoder.jp";
+
+    // 1. コンテストの問題一覧を取得
+    let contest_info = get_problem_list(&base_url, &contest_name).await?;
+    println!("ContestInfo: {:?}", contest_info);
+    // 2. 各問題のディレクトリ構造を作成
+    for problem in &contest_info.problems {
+        create_contest_directory(contest_name, &problem.problem_name)?;
+    }
+
+    // 3. `Cargo.toml` を生成
+    generate_cargo_toml(contest_name, &contest_info.problems)?;
+
+    // 4. `main.rs` をコピー
+    for problem in &contest_info.problems {
+        create_main_rs(contest_name, &problem.problem_name)?;
+    }
+
+    // 5. サンプル入出力ファイル (`tests/`) を作成
+    for problem in &contest_info.problems {
+        create_sample_files(contest_name, &problem.problem_name, &problem.samples)?;
+    }
+
+    println!("Contest setup completed successfully: {}", contest_name);
     Ok(())
 }
 
@@ -110,7 +136,7 @@ pub async fn get_problem_list(
         let problem_name = row
             .select(&problem_name_selector)
             .next()
-            .map(|el| el.text().collect::<String>().trim().to_string())
+            .map(|el| el.text().collect::<String>().trim().to_lowercase())
             .unwrap_or_else(|| "unknown".to_string());
         let timeout_text = row
             .select(&timeout_selector)
@@ -222,10 +248,126 @@ fn parse_samples(document: &Html) -> Result<Vec<Sample>, Box<dyn Error>> {
     Ok(samples)
 }
 
+fn create_contest_directory(contest_name: &str, problem_name: &str) -> Result<(), Box<dyn Error>> {
+    fn is_valid_directory_name(name: &str) -> bool {
+        !name.is_empty() && !name.contains('?') && !name.contains('/') && !name.contains('\\')
+    }
+    if !is_valid_directory_name(contest_name) || !is_valid_directory_name(problem_name) {
+        return Err("無効なディレクトリ名が指定されました".into());
+    }
+
+    let contest_dir = Path::new(contest_name);
+    let tests_dir = contest_dir.join(format!("{}/tests", problem_name));
+    fs::create_dir_all(contest_dir)?;
+    fs::create_dir_all(tests_dir)?;
+
+    Ok(())
+}
+
+fn generate_cargo_toml(contest_name: &str, problems: &[ProblemInfo]) -> Result<(), Box<dyn Error>> {
+    let cargo_toml_path = PathBuf::from(contest_name).join("Cargo.toml");
+    let template_path = PathBuf::from("templates/Cargo.toml");
+    let mut cargo_toml_content = String::new();
+    // templateの[dependencies]を読み込む
+    let mut dependencies_content = String::new();
+    if template_path.exists() {
+        let mut template_file = File::open(template_path)?;
+        template_file.read_to_string(&mut dependencies_content)?;
+    }
+
+    // [package]
+    let package_content = format!(
+        r#"
+[package]
+name = "{}"
+version = "0.1.0"
+edition = "2021"
+    "#,
+        contest_name
+    );
+
+    // [[bin]] & [package.metadata.timeout]
+    let mut bin_content = String::new();
+    let mut timeout_content = String::from("\n[package.metadata.timeout]\n");
+    for problem in problems {
+        let problem_name = &problem.problem_name;
+        bin_content.push_str(&format!(
+            r#"
+[[bin]]
+name = "{}"
+path = "{}/main.rs"
+          "#,
+            problem_name, problem_name
+        ));
+
+        timeout_content.push_str(&format!(
+            r#""{}" = {}
+"#,
+            problem_name, problem.timeout
+        ));
+    }
+
+    cargo_toml_content.push_str(&package_content);
+    cargo_toml_content.push_str(&bin_content);
+    cargo_toml_content.push_str(&timeout_content);
+    cargo_toml_content.push_str("\n");
+    cargo_toml_content.push_str(&dependencies_content);
+
+    let mut file = File::create(&cargo_toml_path)?;
+    file.write_all(cargo_toml_content.as_bytes())?;
+    Ok(())
+}
+
+fn create_main_rs(contest_name: &str, problem_name: &str) -> Result<(), Box<dyn Error>> {
+    let template_path = Path::new("templates/main.rs");
+    let problem_dir = Path::new(contest_name).join(problem_name);
+    let main_rs_path = problem_dir.join("main.rs");
+
+    if !template_path.exists() {
+        return Err("テンプレート main.rs が見つかりません".into());
+    }
+    if !problem_dir.exists() {
+        println!("Creating problem directory: {:?}", problem_dir);
+        fs::create_dir_all(&problem_dir)?;
+    }
+    match fs::copy(&template_path, &main_rs_path) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("Error: Failed to copy main.rs - {}", e);
+            Err(e.into())
+        }
+    }
+}
+
+fn create_sample_files(
+    contest_name: &str,
+    problem_name: &str,
+    samples: &[Sample],
+) -> Result<(), Box<dyn Error>> {
+    let tests_dir = Path::new(contest_name).join(problem_name).join("tests");
+    if !tests_dir.exists() {
+        println!("Creating tests directory: {:?}", tests_dir);
+        fs::create_dir_all(&tests_dir)?;
+    }
+
+    for (i, sample) in samples.iter().enumerate() {
+        let input_file_path = tests_dir.join(format!("sample_{}.in", i + 1));
+        let output_file_path = tests_dir.join(format!("sample_{}.out", i + 1));
+
+        // サンプル入力ファイルを作成
+        println!("Creating input sample file: {:?}", input_file_path);
+        let mut input_file = File::create(&input_file_path)?;
+        input_file.write_all(sample.input.as_bytes())?;
+
+        // サンプル出力ファイルを作成
+        println!("Creating output sample file: {:?}", output_file_path);
+        let mut output_file = File::create(&output_file_path)?;
+        output_file.write_all(sample.output.as_bytes())?;
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod test {
-    use std::result;
-
     use super::*;
     use mockito::Server;
 
@@ -500,5 +642,157 @@ Time Limit: 4 sec / Memory Limit: 1024 MB
         assert_eq!(problem_b.samples[0].output, "12\n15\n20\n");
         assert_eq!(problem_b.samples[1].input, "1 4\n100 100\n");
         assert_eq!(problem_b.samples[1].output, "10100\n10200\n10300\n10400\n");
+        println!("{:?}", result);
+    }
+
+    #[test]
+    fn test_create_contest_directory_success() {
+        let contest_name = "test_contest";
+        let problem_name = "test_problem";
+        let contest_path = Path::new(contest_name);
+        let tests_path = contest_path.join(format!("{}/tests", problem_name));
+
+        // 実行
+        let result = create_contest_directory(contest_name, problem_name);
+
+        // 結果の確認
+        assert!(result.is_ok());
+        assert!(contest_path.exists());
+        assert!(tests_path.exists());
+
+        fs::remove_dir_all(contest_path).unwrap();
+    }
+
+    #[test]
+    fn test_create_contest_directory_invalid_path() {
+        let contest_name = "";
+        let problem_name = "test_problem";
+        let result = create_contest_directory(contest_name, problem_name);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_contest_directory_invalid_characters() {
+        let contest_name = "invalid?contest";
+        let problem_name = "test_problem";
+        let result = create_contest_directory(contest_name, problem_name);
+        assert!(result.is_err());
+    }
+
+    use std::{fs, path::Path};
+    use tempfile;
+    #[test]
+    fn test_generate_cargo_toml_success() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        std::env::set_current_dir(&temp_dir).unwrap();
+        let contest_name = "test_contest";
+        let cargo_toml_path = PathBuf::from(contest_name).join("Cargo.toml");
+
+        let problems = vec![
+            ProblemInfo {
+                problem_name: "a".to_string(),
+                timeout: 2000,
+                samples: vec![],
+            },
+            ProblemInfo {
+                problem_name: "b".to_string(),
+                timeout: 2500,
+                samples: vec![],
+            },
+        ];
+        let contest_dir = Path::new(contest_name);
+        let _ = fs::create_dir_all(contest_dir);
+        let result = generate_cargo_toml(contest_name, &problems);
+        assert!(result.is_ok());
+        assert!(cargo_toml_path.exists());
+        let cargo_content = fs::read_to_string(&cargo_toml_path).unwrap();
+        assert!(cargo_content.contains("[package]"));
+        assert!(cargo_content.contains("name = \"test_contest\""));
+        assert!(cargo_content.contains("version = \"0.1.0\""));
+        assert!(cargo_content.contains("[[bin]]"));
+        assert!(cargo_content.contains("name = \"a\""));
+        assert!(cargo_content.contains("path = \"a/main.rs\""));
+        assert!(cargo_content.contains("[package.metadata.timeout]"));
+        assert!(cargo_content.contains("\"a\" = 2000"));
+        assert!(cargo_content.contains("\"b\" = 2500"));
+    }
+
+    #[test]
+    fn test_create_main_rs_success() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        std::env::set_current_dir(&temp_dir).unwrap();
+        let contest_name = "test_contest";
+        let problem_name = "test_problem";
+        let contest_path = PathBuf::from(contest_name);
+        let problem_path = contest_path.join(problem_name);
+        let main_rs_path = problem_path.join("main.rs");
+        let template_path = Path::new("templates/main.rs");
+
+        // テンプレート `main.rs` を作成
+        fs::create_dir_all("templates").unwrap();
+        fs::write(template_path, "fn main() { println!(\"Hello, world!\"); }").unwrap();
+
+        // 実行
+        let result = create_main_rs(contest_name, problem_name);
+        assert!(result.is_ok());
+
+        // `main.rs` が作成されているか確認
+        assert!(main_rs_path.exists());
+
+        // `main.rs` の内容を確認
+        let content = fs::read_to_string(&main_rs_path).unwrap();
+        assert_eq!(content, "fn main() { println!(\"Hello, world!\"); }");
+
+        // クリーンアップ
+        fs::remove_dir_all(&contest_path).unwrap();
+        fs::remove_file(template_path).unwrap();
+    }
+
+    #[test]
+    fn test_create_main_rs_missing_template() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        std::env::set_current_dir(&temp_dir).unwrap();
+        let contest_name = "test_contest";
+        let problem_name = "test_problem";
+        let result = create_main_rs(contest_name, problem_name);
+
+        // `templates/main.rs` が存在しない場合、エラーになることを確認
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_sample_files_success() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        std::env::set_current_dir(&temp_dir).unwrap();
+        let contest_name = "test_contest";
+        let problem_name = "test_problem";
+        let tests_path = PathBuf::from(contest_name).join(problem_name).join("tests");
+
+        let samples = vec![
+            Sample {
+                input: "Kyoto".to_string(),
+                output: "KUPC".to_string(),
+            },
+            Sample {
+                input: "Tohoku".to_string(),
+                output: "TUPC".to_string(),
+            },
+        ];
+
+        let result = create_sample_files(contest_name, problem_name, &samples);
+        assert!(result.is_ok());
+        for (i, sample) in samples.iter().enumerate() {
+            let input_file_path = tests_path.join(format!("sample_{}.in", i + 1));
+            let output_file_path = tests_path.join(format!("sample_{}.out", i + 1));
+
+            assert!(input_file_path.exists());
+            assert!(output_file_path.exists());
+
+            let input_content = fs::read_to_string(&input_file_path).unwrap();
+            let output_content = fs::read_to_string(&output_file_path).unwrap();
+
+            assert_eq!(input_content, sample.input);
+            assert_eq!(output_content, sample.output);
+        }
     }
 }

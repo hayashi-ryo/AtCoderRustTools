@@ -1,17 +1,5 @@
-[package]
-name = "${CONTEST_NAME}"
-version = "0.1.0"
-edition = "2021"
-
-[bin]
-name = "${RROBLEM_NAME}"
-path = "${RROBLEM_NAME}/main.rs"
-
-[package.metadata.timeout]
-"${RROBLEM_NAME}" = 2000
-
-
 [dependencies]
+smallvec = "1.11.0"
 ac-library-rs = "0.1.1"
 once_cell = "1.18.0"
 static_assertions = "1.1.0"
@@ -73,4 +61,3 @@ bitset-fixed = "0.1.0"
 proconio = "0.4.5"
 text_io = "0.1.12"
 rustc-hash = "1.1.0"
-smallvec = "1.11.0
