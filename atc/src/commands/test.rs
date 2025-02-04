@@ -17,18 +17,6 @@
 //!         ├── sample_1.out    
 //!         ├── sample_2.in
 //!         └── sample_2.out
-//!
-//! memo
-//! exexute
-//! 1. find_problem_directoryで問題格納ディレクトリの取得
-//! 2. compileでproblem_name/main.rsをコンパイル
-//! 3. collect_test_casesでテストケースを取得してvecに格納
-//! 4. timeout_settingsでcontest_nameのtimeout設定をhashmapとして取得
-//! 5. return_resultsでユーザに結果を返却
-//!     1. 実行ファイルの取得
-//!     2. テストケースごとに実行
-//!     3. resultvecに格納
-//! 6. ユーザに結果を返却
 use std::{
     collections::HashMap,
     error::Error,
@@ -47,13 +35,12 @@ use toml::Value;
 /// # 引数
 ///
 /// * `problem_name` - 処理対象となる問題名
-pub fn execute(problem_name: &str) -> Result<(), Box<dyn Error>> {
-    let _project_root = std::env::current_dir()?;
-    let dir = find_problem_directory(problem_name)?;
-    compile(&dir)?;
-    let test_cases = collect_test_cases(&dir)?;
-    let timeout_settings = load_problem_timeout_settings()?;
-    let results = return_results(test_cases, problem_name, &timeout_settings).unwrap();
+pub fn execute(work_dir: &PathBuf, problem_name: &str) -> Result<(), Box<dyn Error>> {
+    let problem_dir = find_problem_directory(&work_dir, problem_name)?;
+    compile(&problem_dir)?;
+    let test_cases = collect_test_cases(&problem_dir)?;
+    let timeout_settings = load_problem_timeout_settings(&work_dir)?;
+    let results = return_results(&work_dir, test_cases, problem_name, &timeout_settings).unwrap();
 
     println!("\n=== Test Results Summary ===");
     for result in &results {
@@ -122,8 +109,11 @@ impl Display for TestStatus {
 /// # 戻り値
 ///
 /// ディレクトリパスを返却する。
-fn find_problem_directory(problem_name: &str) -> Result<PathBuf, Box<dyn Error>> {
-    let dir = Path::new("./").join(problem_name);
+fn find_problem_directory(
+    work_dir: &PathBuf,
+    problem_name: &str,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let dir = work_dir.join(problem_name);
     if dir.exists() && dir.is_dir() {
         Ok(dir)
     } else {
@@ -154,7 +144,7 @@ fn compile(dir: &Path) -> Result<(), Box<dyn Error>> {
 ///
 /// # 引数
 ///
-/// * `dir` - テストケースが格納されている問題ディレクトリ。
+/// * `dir` - 問題ごとのディレクトリ
 ///
 /// # 戻り値
 ///
@@ -190,9 +180,8 @@ fn collect_test_cases(dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>, Box<dyn Err
 /// # 戻り値
 ///
 /// 実行可能ファイルのパスを返す。
-fn get_execution_path(problem_name: &str) -> Result<PathBuf, Box<dyn Error>> {
-    let project_root = std::env::current_dir()?;
-    let executable = project_root.join(format!("target/debug/{}", problem_name));
+fn get_execution_path(work_dir: &PathBuf, problem_name: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let executable = work_dir.join(format!("target/debug/{}", problem_name));
     if executable.exists() {
         Ok(executable)
     } else {
@@ -205,8 +194,10 @@ fn get_execution_path(problem_name: &str) -> Result<PathBuf, Box<dyn Error>> {
 }
 
 /// Cargo.tomlから問題ごとのタイムアウト設定を取得する。
-fn load_problem_timeout_settings() -> Result<HashMap<String, u64>, Box<dyn Error>> {
-    let cargo_toml_path = Path::new("Cargo.toml");
+fn load_problem_timeout_settings(
+    work_dir: &PathBuf,
+) -> Result<HashMap<String, u64>, Box<dyn Error>> {
+    let cargo_toml_path = work_dir.join("Cargo.toml");
     if !cargo_toml_path.exists() {
         return Err("Cargo.toml not found in the current directory".into());
     }
@@ -235,11 +226,12 @@ fn load_problem_timeout_settings() -> Result<HashMap<String, u64>, Box<dyn Error
 }
 
 fn return_results(
+    work_dir: &PathBuf,
     test_cases: Vec<(PathBuf, PathBuf)>,
     problem_name: &str,
     timeout_settings: &HashMap<String, u64>,
 ) -> Result<Vec<TestCaseResult>, Box<dyn Error>> {
-    let executable = get_execution_path(problem_name)?;
+    let executable = get_execution_path(&work_dir, problem_name)?;
     let mut results = Vec::new();
     let timeout = timeout_settings.get(problem_name).copied().unwrap();
     if !executable.exists() {
@@ -324,32 +316,28 @@ fn return_results(
 #[cfg(test)]
 mod test {
     use super::*;
-    use serial_test::serial;
     use std::{fs, path::Path};
-    use tempfile::TempDir;
+    use tempfile::{self, TempDir};
 
     #[test]
     fn find_problem_directory_success() {
-        // preparation
-        let temp_dir = TempDir::new_in(".").expect("Error");
-        let dir_name = temp_dir
-            .path()
-            .file_name()
-            .expect("")
-            .to_string_lossy()
-            .to_string();
-
+        let temp_dir = tempfile::tempdir().expect("");
+        let problem_name = "test_problem";
+        let problem_dir = temp_dir.path().join(problem_name);
+        std::fs::create_dir(&problem_dir).expect("");
         // test
-        let result = find_problem_directory(&dir_name);
-        println!("PATH: {}", dir_name);
+        let result = find_problem_directory(&temp_dir.path().to_path_buf(), &problem_name);
         assert!(result.is_ok());
-        let path = result.unwrap();
-        assert_eq!(path.to_str().unwrap(), format!("./{}", dir_name));
+        let expected_path = problem_dir.canonicalize().expect("");
+        let found_path = result.unwrap().canonicalize().expect("");
+        assert_eq!(found_path, expected_path);
     }
 
     #[test]
     fn find_problem_directory_failed() {
-        let result = find_problem_directory("non_existent_dir");
+        let temp_dir = tempfile::tempdir().expect("");
+        let problem_name = "test_problem";
+        let result = find_problem_directory(&temp_dir.path().to_path_buf(), &problem_name);
 
         // test
         assert!(result.is_err());
@@ -359,8 +347,7 @@ mod test {
 
     #[test]
     fn compile_success() {
-        // preparation
-        let temp_dir = TempDir::new_in(".").expect("Error");
+        let temp_dir = tempfile::tempdir().expect("");
         fs::write(
             temp_dir.path().join("Cargo.toml"),
             r#"
@@ -389,8 +376,7 @@ mod test {
 
     #[test]
     fn compile_failed() {
-        // preparation
-        let temp_dir = TempDir::new_in(".").expect("Error");
+        let temp_dir = tempfile::tempdir().expect("");
         fs::write(
             temp_dir.path().join("Cargo.toml"),
             r#"
@@ -421,14 +407,12 @@ mod test {
 
     #[test]
     fn collect_test_cases_success() {
-        let temp_dir = TempDir::new_in(".").expect("Error");
-        //std::fs::create_dir_all(test_dir).unwrap();
+        let temp_dir = tempfile::tempdir().expect("");
         std::fs::create_dir_all(temp_dir.path().join("tests")).unwrap();
         std::fs::write(temp_dir.path().join("tests/sample_1.in"), "input1").unwrap();
         std::fs::write(temp_dir.path().join("tests/sample_1.out"), "output1").unwrap();
 
         let test_cases = collect_test_cases(temp_dir.path()).unwrap();
-
         assert_eq!(test_cases.len(), 1);
         assert_eq!(test_cases[0].0.ends_with("sample_1.in"), true);
         assert_eq!(test_cases[0].1.ends_with("sample_1.out"), true);
@@ -436,7 +420,7 @@ mod test {
 
     #[test]
     fn collect_test_cases_failed() {
-        let temp_dir = TempDir::new_in(".").expect("Error");
+        let temp_dir = tempfile::tempdir().expect("");
         std::fs::create_dir_all(temp_dir.path().join("tests")).unwrap();
         std::fs::write(temp_dir.path().join("tests/sample_1.in"), "input1").unwrap();
 
@@ -445,11 +429,9 @@ mod test {
     }
 
     #[test]
-    #[serial]
     fn load_problem_timeout_settings_success() {
-        // テスト向けファイルの準備
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        std::env::set_current_dir(&temp_dir).unwrap();
+        let temp_dir = tempfile::tempdir().expect("");
+        let cargo_toml_path = temp_dir.path().join("Cargo.toml");
         let cargo_toml_content = r#"        
         [package]
         name = "test_project"
@@ -462,22 +444,20 @@ mod test {
         "#;
 
         std::fs::create_dir_all(temp_dir.path()).unwrap();
-        std::env::set_current_dir(&temp_dir.path()).unwrap();
-        fs::write("Cargo.toml", cargo_toml_content).unwrap();
+        fs::write(cargo_toml_path, cargo_toml_content).unwrap();
 
         // テスト
-
-        let timeout_settings = load_problem_timeout_settings().unwrap();
+        let timeout_settings =
+            load_problem_timeout_settings(&temp_dir.path().to_path_buf()).unwrap();
         assert_eq!(timeout_settings.get("a"), Some(&2000));
         assert_eq!(timeout_settings.get("b"), Some(&4000));
     }
 
     #[test]
-    #[serial]
     fn load_problem_timeout_settings_failed() {
         // テスト向けファイルの準備
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        std::env::set_current_dir(&temp_dir).unwrap();
+        let temp_dir = tempfile::tempdir().expect("");
+        let cargo_toml_path = temp_dir.path().join("Cargo.toml");
         let cargo_toml_content = r#"        
         [package]
         name = "test_project"
@@ -489,63 +469,67 @@ mod test {
         b = 4000
         "#;
         std::fs::create_dir_all(temp_dir.path()).unwrap();
-        std::env::set_current_dir(&temp_dir).unwrap();
-        fs::write("Cargo.toml", cargo_toml_content).unwrap();
+        fs::write(cargo_toml_path, cargo_toml_content).unwrap();
 
         // テスト
 
-        let timeout_settings = load_problem_timeout_settings().unwrap();
+        let timeout_settings =
+            load_problem_timeout_settings(&temp_dir.path().to_path_buf()).unwrap();
         assert!(timeout_settings.get("c").is_none());
     }
 
     /// テスト環境構築
     fn setup_test_environment(
+        work_dir: &TempDir,
         test_cases: Vec<(&str, &str, &str)>,
         problem_name: &str,
         timeout: u64,
     ) -> HashMap<String, u64> {
-        let problem_dir = Path::new(problem_name);
+        let problem_dir_path = work_dir.path().join(problem_name);
+        let cargo_toml_path = work_dir.path().join("Cargo.toml");
+        let main_rs_path = &problem_dir_path.join("main.rs");
         let cargo_toml_content = format!(
             r#"
-        [package]
-        name = "{}"
-        version = "0.1.0"
-        edition = "2021"
+[package]
+name = "{}"
+version = "0.1.0"
+edition = "2021"
 
-        [[bin]]
-        name = "{}"
-        path = "{}/main.rs"
+[[bin]]
+name = "{}"
+path = "{}/main.rs"
 
-        [dependencies]
-        proconio = "0.4.5"
+[dependencies]
+proconio = "0.4.5"
     "#,
             problem_name, problem_name, problem_name
         );
 
         // プロジェクト構成を作成
-        fs::create_dir_all(problem_dir.join(problem_name)).unwrap();
-        fs::write("Cargo.toml", cargo_toml_content).unwrap();
+        fs::create_dir_all(&problem_dir_path).unwrap();
+        fs::write(cargo_toml_path, cargo_toml_content).unwrap();
         fs::write(
-            problem_dir.join("main.rs"),
+            main_rs_path,
             r#"
-            use proconio::input;
-            fn main() {
-                input! {
-                    a: i32,
-                    b: i32,
-                }
-                println!("{}", a / b);
-            }
+use proconio::input;
+fn main() {
+    input! {
+        a: i32,
+        b: i32,
+    }
+    println!("{}", a / b);
+}
         "#,
         )
         .unwrap();
 
         // テストケース作成
-        fs::create_dir_all(problem_dir.join("tests")).unwrap();
+        let test_dir_path = &problem_dir_path.join("tests");
+        fs::create_dir_all(&test_dir_path).unwrap();
         for (input_name, input_content, output_content) in test_cases {
-            fs::write(problem_dir.join("tests").join(input_name), input_content).unwrap();
+            fs::write(&test_dir_path.join(input_name), input_content).unwrap();
             let output_name = input_name.replace(".in", ".out");
-            fs::write(problem_dir.join("tests").join(output_name), output_content).unwrap();
+            fs::write(&test_dir_path.join(output_name), output_content).unwrap();
         }
 
         // タイムアウト設定を返却
@@ -563,24 +547,32 @@ mod test {
     }
 
     #[test]
-    #[serial]
     fn return_results_ac() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        std::env::set_current_dir(&temp_dir).unwrap();
+        let work_dir = tempfile::tempdir().expect("");
 
         // テスト環境をセットアップ
         let problem_name = "test_ac";
-        let timeout_settings =
-            setup_test_environment(vec![("sample_1.in", "4 2\n", "2\n")], problem_name, 2000);
+        let timeout_settings = setup_test_environment(
+            &work_dir,
+            vec![("sample_1.in", "4 2\n", "2\n")],
+            problem_name,
+            2000,
+        );
 
         // テストケース収集
-        let test_cases = collect_test_cases(Path::new(problem_name)).unwrap();
+        let problem_dir = &work_dir.path().join(problem_name);
+        let test_cases = collect_test_cases(problem_dir).unwrap();
 
         // プロジェクトをコンパイル
-        let _ = compile(&temp_dir.path());
+        let _ = compile(&work_dir.path());
 
         // テスト結果を確認
-        let results = return_results(test_cases, problem_name, &timeout_settings);
+        let results = return_results(
+            &work_dir.path().to_path_buf(),
+            test_cases,
+            problem_name,
+            &timeout_settings,
+        );
         assert!(results.is_ok());
         let results = results.unwrap();
         assert_eq!(results.len(), 1);
@@ -591,24 +583,32 @@ mod test {
     }
 
     #[test]
-    #[serial]
     fn return_results_wa() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        std::env::set_current_dir(&temp_dir).unwrap();
+        let work_dir = tempfile::tempdir().expect("");
 
         // テスト環境をセットアップ
         let problem_name = "test_wa";
-        let timeout_settings =
-            setup_test_environment(vec![("sample_1.in", "4 2\n", "0\n")], problem_name, 2000);
+        let timeout_settings = setup_test_environment(
+            &work_dir,
+            vec![("sample_1.in", "4 2\n", "0\n")],
+            problem_name,
+            2000,
+        );
 
         // テストケース収集
-        let test_cases = collect_test_cases(Path::new(problem_name)).unwrap();
+        let problem_dir = &work_dir.path().join(problem_name);
+        let test_cases = collect_test_cases(problem_dir).unwrap();
 
         // プロジェクトをコンパイル
-        let _ = compile(&temp_dir.path());
+        let _ = compile(&work_dir.path());
 
         // テスト結果を確認
-        let results = return_results(test_cases, problem_name, &timeout_settings);
+        let results = return_results(
+            &work_dir.path().to_path_buf(),
+            test_cases,
+            problem_name,
+            &timeout_settings,
+        );
         assert!(results.is_ok());
         let results = results.unwrap();
         assert_eq!(results.len(), 1);
@@ -619,24 +619,32 @@ mod test {
     }
 
     #[test]
-    #[serial]
     fn return_results_tle() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        std::env::set_current_dir(&temp_dir).unwrap();
+        let work_dir = tempfile::tempdir().expect("");
 
         // テスト環境をセットアップ
         let problem_name = "test_tle";
-        let timeout_settings =
-            setup_test_environment(vec![("sample_1.in", "4 2\n", "2\n")], problem_name, 5);
+        let timeout_settings = setup_test_environment(
+            &work_dir,
+            vec![("sample_1.in", "4 2\n", "2\n")],
+            problem_name,
+            5,
+        );
 
         // テストケース収集
-        let test_cases = collect_test_cases(Path::new(problem_name)).unwrap();
+        let problem_dir = &work_dir.path().join(problem_name);
+        let test_cases = collect_test_cases(problem_dir).unwrap();
 
         // プロジェクトをコンパイル
-        let _ = compile(&temp_dir.path());
+        let _ = compile(&work_dir.path());
 
         // テスト結果を確認
-        let results = return_results(test_cases, problem_name, &timeout_settings);
+        let results = return_results(
+            &work_dir.path().to_path_buf(),
+            test_cases,
+            problem_name,
+            &timeout_settings,
+        );
         assert!(results.is_ok());
         let results = results.unwrap();
         assert_eq!(results.len(), 1);
@@ -647,24 +655,32 @@ mod test {
     }
 
     #[test]
-    #[serial]
     fn return_results_re() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-        std::env::set_current_dir(&temp_dir).unwrap();
+        let work_dir = tempfile::tempdir().expect("");
 
         // テスト環境をセットアップ
         let problem_name = "test_re";
-        let timeout_settings =
-            setup_test_environment(vec![("sample_1.in", "4 0\n", "2\n")], problem_name, 2000);
+        let timeout_settings = setup_test_environment(
+            &work_dir,
+            vec![("sample_1.in", "4 0\n", "2\n")],
+            problem_name,
+            2000,
+        );
 
         // テストケース収集
-        let test_cases = collect_test_cases(Path::new(problem_name)).unwrap();
+        let problem_dir = &work_dir.path().join(problem_name);
+        let test_cases = collect_test_cases(problem_dir).unwrap();
 
         // プロジェクトをコンパイル
-        let _ = compile(&temp_dir.path());
+        let _ = compile(&work_dir.path());
 
         // テスト結果を確認
-        let results = return_results(test_cases, problem_name, &timeout_settings);
+        let results = return_results(
+            &work_dir.path().to_path_buf(),
+            test_cases,
+            problem_name,
+            &timeout_settings,
+        );
         assert!(results.is_ok());
         let results = results.unwrap();
         assert_eq!(results.len(), 1);
