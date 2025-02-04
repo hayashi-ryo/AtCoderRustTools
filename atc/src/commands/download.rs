@@ -16,7 +16,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-pub async fn execute(contest_name: &str) -> Result<(), Box<dyn Error>> {
+pub async fn execute(work_dir: &PathBuf, contest_name: &str) -> Result<(), Box<dyn Error>> {
     let base_url = "https://atcoder.jp";
 
     // 1. コンテストの問題一覧を取得
