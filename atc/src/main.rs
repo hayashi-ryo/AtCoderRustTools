@@ -16,6 +16,7 @@ enum Commands {
     Login,
     Test { problem_name: String },
     Download { contest_name: String },
+    Submit { problem_name: String },
 }
 
 #[tokio::main]
@@ -37,6 +38,11 @@ async fn main() {
         Commands::Download { contest_name } => {
             println!("DEBUG0");
             if let Err(e) = commands::download::execute(&work_dir, &contest_name).await {
+                eprintln!("Error: {}", e);
+            }
+        }
+        Commands::Submit { problem_name } => {
+            if let Err(e) = commands::submit::execute(&work_dir, &problem_name).await {
                 eprintln!("Error: {}", e);
             }
         }

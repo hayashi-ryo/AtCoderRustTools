@@ -178,6 +178,7 @@ dependencies = [
  "clap",
  "mockall",
  "mockito",
+ "regex",
  "reqwest",
  "rpassword",
  "scraper",
