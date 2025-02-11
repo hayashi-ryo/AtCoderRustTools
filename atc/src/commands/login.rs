@@ -1,5 +1,4 @@
-use reqwest::cookie::Jar;
-use reqwest::{Client, Response, StatusCode};
+use reqwest::{cookie::Jar, Client, Response, StatusCode};
 use rpassword::read_password;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
@@ -22,22 +21,17 @@ pub async fn execute() -> Result<(), Box<dyn Error>> {
 
     if let Some(session) = Session::load(&session_path)? {
         if !session.is_expired() {
-            println!("既存のセッションを利用します");
             return Ok(());
         }
     }
 
-    println!("再ログインを実施します。");
+    println!("login:");
     let credentials =
         get_credentials().map_err(|e| format!("認証情報の取得に失敗しました: {}", e))?;
-
     let session = login_to_atcoder(&credentials, BASE_URL)
         .await
         .map_err(|e| format!("ログイン中にエラーが発生しました: {}", e))?;
-
     session.save(&session_path)?;
-
-    println!("新しいセッションを保存しました");
 
     Ok(())
 }
@@ -50,10 +44,14 @@ pub struct Session {
     pub session_cookie: String,
     pub last_login_time: u64,
 }
-
 impl Session {
     /// セッション情報を保存
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?; // 親ディレクトリを作成
+            }
+        }
         let json = serde_json::to_string_pretty(self)?;
         fs::write(path, json)?;
         Ok(())
@@ -72,7 +70,9 @@ impl Session {
         }
     }
 
-    /// 再ログインが必要か判定
+    /// セッションの有効期限が切れているかを判定する。
+    ///
+    /// - `SESSION_EXPIRY` を超えている場合`true`を返す。
     pub fn is_expired(&self) -> bool {
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -81,17 +81,29 @@ impl Session {
         current_time - self.last_login_time > SESSION_EXPIRY
     }
 }
+
+/// ユーザーIDとパスワードを受け取る構造体
 pub struct UserCredentials {
     pub user_id: String,
     pub password: String,
 }
 
+/// ユーザー認証情報を作成する
 impl UserCredentials {
     pub fn new(user_id: String, password: String) -> Self {
         UserCredentials { user_id, password }
     }
 }
 
+/// ユーザーの認証情報を取得する
+///
+/// - 標準入力からユーザーIDとパスワードを取得する。
+/// - パスワードは `rpassword::read_password()` を使用して非表示入力する。
+/// - 入力後、`UserCredentials` 構造体として返す。
+///
+/// # 戻り値
+/// - `Ok(UserCredentials)`: ユーザーIDとパスワードの取得に成功した場合
+/// - `Err(io::Error)`: 入力の読み取りに失敗した場合
 pub fn get_credentials() -> Result<UserCredentials, io::Error> {
     let user_id = prompt_user("User ID: ")?;
     let password = prompt_password("Password: ")?;
@@ -99,6 +111,14 @@ pub fn get_credentials() -> Result<UserCredentials, io::Error> {
     Ok(UserCredentials::new(user_id, password))
 }
 
+/// ユーザーにプロンプトを表示し、標準入力から文字列を取得する
+///
+/// # 引数
+/// - `prompt`: ユーザーに表示するプロンプト文字列
+///
+/// # 戻り値
+/// - `Ok(String)`: 入力された文字列（前後の空白は除去）
+/// — `Err(io::Error)`: 入力の読み取りに失敗した場合
 fn prompt_user(prompt: &str) -> Result<String, io::Error> {
     print!("{}", prompt);
     io::stdout().flush()?;
@@ -107,6 +127,14 @@ fn prompt_user(prompt: &str) -> Result<String, io::Error> {
     Ok(input.trim().to_string())
 }
 
+/// ユーザーにプロンプトを表示し、標準入力からパスワードを取得する（非表示入力）
+///
+/// # 引数
+/// - `prompt`: ユーザーに表示するプロンプト文字列
+///
+/// # 戻り値
+/// - `Ok(String)`: 入力されたパスワード（前後の空白は除去）
+/// — `Err(io::Error)`: 入力の読み取りに失敗した場合
 fn prompt_password(prompt: &str) -> Result<String, io::Error> {
     print!("{}", prompt);
     io::stdout().flush()?;
@@ -114,7 +142,19 @@ fn prompt_password(prompt: &str) -> Result<String, io::Error> {
     Ok(password)
 }
 
-/// AtCoderにログイン
+/// AtCoderにログインし、セッション情報を取得する
+///
+/// # 引数
+/// - `credentials`: ユーザーIDとパスワードを格納した `UserCredentials` 構造体
+/// - `base_url`: AtCoderのベースURL (`https://atcoder.jp`)
+///
+/// # 戻り値
+/// - `Ok(Session)`: ログインに成功し、取得したセッション情報を格納した `Session` 構造体
+/// - `Err(Box<dyn std::error::Error>)`: ログイン処理が失敗した場合のエラー
+///
+/// # 例外
+/// - AtCoderのページ構造が変更された場合、CSRFトークンの取得に失敗する可能性がある
+/// - ログイン失敗時にはエラーメッセージを返す
 pub async fn login_to_atcoder(
     credentials: &UserCredentials,
     base_url: &str,
@@ -139,7 +179,6 @@ pub async fn login_to_atcoder(
     ];
     let login_response = client.post(&login_url).form(&login_form).send().await?;
     validate_login(&login_response)?;
-    println!("{:?}", login_response);
     // セッションCookie
     let session_cookie = extract_cookie(&login_response)?;
     let session = Session {
@@ -152,7 +191,19 @@ pub async fn login_to_atcoder(
     Ok(session)
 }
 
-/// CSRFトークンを取得
+/// CSRFトークンを取得する
+///
+/// # 引数
+/// - `client`: `reqwest::Client` オブジェクト
+/// - `url`: トークンを取得するページURL
+///
+/// # 戻り値
+/// - `Ok(String)`: 取得したCSRFトークン
+/// - `Err(Box<dyn Error>)`: CSRFトークンの取得に失敗した場合のエラー
+///
+/// # 例外
+/// - AtCoderのページ構造が変更された場合、CSRFトークンの取得に失敗する可能性がある
+/// - ネットワークエラーによりページが取得できない場合はエラーを返す
 async fn get_csrf_token(client: &Client, url: &str) -> Result<String, Box<dyn Error>> {
     let selector = Selector::parse("input[name=\"csrf_token\"]").unwrap();
     let body = client.get(url).send().await?.text().await?;
@@ -168,7 +219,18 @@ async fn get_csrf_token(client: &Client, url: &str) -> Result<String, Box<dyn Er
     Ok(csrf_token)
 }
 
-/// ログイン成功判定
+/// AtCoderのログインレスポンスを検証し、ログイン成功かどうかを判定する
+///
+/// # 引数
+/// - `response`: `reqwest::Response` オブジェクト（ログインリクエストのレスポンス）
+///
+/// # 戻り値
+/// - `Ok(())`: ログイン成功
+/// - `Err(Box<dyn Error>)`: ログインに失敗した場合のエラー
+///
+/// # 例外
+/// - HTTP ステータスコードが 302 でなく、リダイレクトURLが `/home` でない場合はエラーを返す
+/// - ネットワークエラーなどが発生した場合、エラーを返す
 fn validate_login(response: &Response) -> Result<(), Box<dyn Error>> {
     if response.status() == StatusCode::FOUND {
         if let Some(location) = response.headers().get("Location") {
@@ -180,7 +242,18 @@ fn validate_login(response: &Response) -> Result<(), Box<dyn Error>> {
     Err("ログインに失敗しました。IDまたはパスワードを確認してください。".into())
 }
 
-/// Cookieを取得
+/// AtCoderのログインレスポンスからセッションCookie (`REVEL_SESSION`) を抽出する
+///
+/// # 引数
+/// - `response`: `reqwest::Response` オブジェクト（ログインリクエストのレスポンス）
+///
+/// # 戻り値
+/// - `Ok(String)`: 抽出した `REVEL_SESSION` の値
+/// - `Err(Box<dyn Error>)`: セッションCookieの取得に失敗した場合のエラー
+///
+/// # 例外
+/// - `Set-Cookie` ヘッダーに `REVEL_SESSION` が存在しない場合はエラーを返す
+/// - `Set-Cookie` に `REVEL_SESSION` 以外の値が含まれている場合は無視し、`REVEL_SESSION` のみを取得する
 fn extract_cookie(response: &Response) -> Result<String, Box<dyn Error>> {
     let mut cookie_string = String::new();
 
@@ -235,10 +308,7 @@ mod test {
             ]))
             .with_status(302) // リダイレクトを模倣
             .with_header("Location", "/home") // リダイレクト先
-            .with_header(
-                "Set-Cookie",
-                "session_cookie=mock_session_cookie; Path=/; HttpOnly",
-            )
+            .with_header("set-cookie", "REVEL_SESSION=mock_session_cookie;")
             .create();
 
         let credentials =
@@ -250,7 +320,7 @@ mod test {
         let session = response.unwrap();
         assert_eq!(session.username, "mock_user");
         assert_eq!(session.csrf_token, "mock_csrf_token");
-        assert_eq!(session.session_cookie, "session_cookie=mock_session_cookie");
+        assert_eq!(session.session_cookie, "REVEL_SESSION=mock_session_cookie;");
 
         _get_mock.assert();
         _post_mock.assert();
@@ -295,8 +365,9 @@ mod test {
     }
 
     #[test]
-    fn test_save_and_load_session() {
+    fn test_save_and_load_session_success() {
         let work_dir = tempfile::tempdir().expect("");
+        let session_file_path = work_dir.path().join("test/session.json");
         let session = Session {
             username: "mock_user".to_string(),
             csrf_token: "mock_csrf_token".to_string(),
@@ -306,25 +377,28 @@ mod test {
                 .unwrap()
                 .as_secs(),
         };
-        let session_file_path = work_dir.path().join("session.json");
-        let test_path = session_file_path.to_str().unwrap();
-        //        save_session(&session, test_path).unwrap();
-
-        let saved_data = fs::read_to_string(test_path).unwrap();
+        session.save(&session_file_path).expect("");
+        let saved_data = fs::read_to_string(&session_file_path).unwrap();
         let expected_json = serde_json::to_string_pretty(&session).unwrap();
-        assert_eq!(
-            saved_data, expected_json,
-            "保存されたJSONデータが想定と異なる"
-        );
-
-        //      let loaded_session = load_session(test_path).unwrap();
-        //assert_eq!(session.username, loaded_session.username);
-        //assert_eq!(session.csrf_token, loaded_session.csrf_token);
-        //assert_eq!(session.session_cookie, loaded_session.session_cookie);
+        assert_eq!(saved_data, expected_json);
+        let loaded_session = Session::load(&session_file_path).unwrap().unwrap();
+        assert_eq!(session.username, loaded_session.username);
+        assert_eq!(session.csrf_token, loaded_session.csrf_token);
+        assert_eq!(session.session_cookie, loaded_session.session_cookie);
     }
 
     #[test]
-    fn test_is_relogin_required() {
+    fn test_load_invalid_session_file() {
+        let work_dir = tempfile::tempdir().expect("");
+        let session_file_path = work_dir.path().join("invalid_session.json");
+        fs::write(&session_file_path, "{ invalid json }")
+            .expect("不正なJSONデータの書き込みに失敗");
+        let result = Session::load(&session_file_path).expect("セッションロードに失敗");
+        assert!(result.is_none(),);
+    }
+
+    #[test]
+    fn test_is_expired() {
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -334,17 +408,25 @@ mod test {
             username: "mock_user".to_string(),
             csrf_token: "mock_csrf_token".to_string(),
             session_cookie: "mock_session_cookie".to_string(),
-            last_login_time: current_time - 1000, // 1000秒前 → まだ有効
+            last_login_time: current_time - 1000, // 1000秒前 (期限内)
         };
-        // assert!(!is_relogin_required(&valid_session));
+        assert!(!valid_session.is_expired());
+
+        let just_expired_session = Session {
+            username: "mock_user".to_string(),
+            csrf_token: "mock_csrf_token".to_string(),
+            session_cookie: "mock_session_cookie".to_string(),
+            last_login_time: current_time - SESSION_EXPIRY,
+        };
+        assert!(!just_expired_session.is_expired());
 
         let expired_session = Session {
             username: "mock_user".to_string(),
             csrf_token: "mock_csrf_token".to_string(),
             session_cookie: "mock_session_cookie".to_string(),
-            last_login_time: current_time - (SESSION_EXPIRY + 1), // 期限切れ
+            last_login_time: current_time - (SESSION_EXPIRY + 1),
         };
-        //       assert!(is_relogin_required(&expired_session));
+        assert!(expired_session.is_expired());
     }
 
     #[tokio::test]
@@ -374,5 +456,173 @@ mod test {
 
         assert_eq!(csrf_token, "test_csrf_token");
         _get_mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_validate_login_success() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/login")
+            .with_status(302)
+            .with_header("content-type", "text/html")
+            .with_header("Location", "/home")
+            .create();
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none()) // リダイレクトを無効化
+            .build()
+            .unwrap();
+        let response = client
+            .post(&format!("{}/login", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = validate_login(&response);
+        assert!(result.is_ok());
+        _mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_validate_login_failed_wrong_status() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/login")
+            .with_status(200)
+            .with_header("Location", "/home")
+            .create();
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none()) // リダイレクトを無効化
+            .build()
+            .unwrap();
+        let response = client
+            .post(&format!("{}/login", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = validate_login(&response);
+        assert!(result.is_err());
+        _mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_validate_login_failed_wrong_location() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/login")
+            .with_status(302)
+            .with_header("Location", "/login")
+            .create();
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none()) // リダイレクトを無効化
+            .build()
+            .unwrap();
+        let response = client
+            .post(&format!("{}/login", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = validate_login(&response);
+        assert!(result.is_err());
+        _mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_validate_login_failed_no_location_header() {
+        let mut server = Server::new_async().await;
+        let _mock = server.mock("POST", "/login").with_status(302).create();
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none()) // リダイレクトを無効化
+            .build()
+            .unwrap();
+        let response = client
+            .post(&format!("{}/login", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = validate_login(&response);
+        assert!(result.is_err());
+        _mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_extract_cookie_success() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/login")
+            .with_status(302)
+            .with_header(
+                "Set-Cookie",
+                "REVEL_SESSION=mock_session_cookie; Path=/; HttpOnly",
+            )
+            .create();
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none()) // リダイレクトを無効化
+            .build()
+            .unwrap();
+        let response = client
+            .post(&format!("{}/login", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = extract_cookie(&response);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "REVEL_SESSION=mock_session_cookie");
+        _mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_extract_cookie_multiple_cookies() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/login")
+            .with_status(302)
+            .with_header("Set-Cookie", "OTHER_COOKIE=some_value; Path=/; HttpOnly")
+            .with_header(
+                "Set-Cookie",
+                "REVEL_SESSION=mock_session_cookie; Path=/; HttpOnly",
+            )
+            .with_header(
+                "Set-Cookie",
+                "ANOTHER_COOKIE=another_value; Path=/; HttpOnly",
+            )
+            .create();
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none()) // リダイレクトを無効化
+            .build()
+            .unwrap();
+        let response = client
+            .post(&format!("{}/login", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = extract_cookie(&response);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "REVEL_SESSION=mock_session_cookie");
+        _mock.assert();
+    }
+
+    #[tokio::test]
+    async fn test_extract_cookie_not_found() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/login")
+            .with_status(302)
+            .with_header("Set-Cookie", "OTHER_COOKIE=some_value; Path=/; HttpOnly")
+            .with_header(
+                "Set-Cookie",
+                "ANOTHER_COOKIE=another_value; Path=/; HttpOnly",
+            )
+            .create();
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none()) // リダイレクトを無効化
+            .build()
+            .unwrap();
+        let response = client
+            .post(&format!("{}/login", server.url()))
+            .send()
+            .await
+            .unwrap();
+        let result = extract_cookie(&response);
+        assert!(result.is_err());
+        _mock.assert();
     }
 }
