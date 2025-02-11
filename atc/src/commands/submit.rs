@@ -26,9 +26,9 @@ use reqwest::{Client, StatusCode};
 use std::{error::Error, fs, path::PathBuf};
 use toml::Value;
 
-use crate::commands::config::{BASE_URL, SESSION_FILE};
-use crate::commands::login::execute as login_execute;
-use crate::commands::login::Session;
+use super::config::{get_session_file, BASE_URL};
+use super::login::execute as login_execute;
+use super::login::Session;
 /// オプション機能
 /// 提出前に test を実行する
 ///
@@ -56,7 +56,7 @@ use crate::commands::login::Session;
 /// cargo atc submit --open で提出後に自動で提出結果ページを開く
 pub async fn execute(work_dir: &PathBuf, problem_name: &str) -> Result<(), Box<dyn Error>> {
     login_execute().await?;
-    let session_path = PathBuf::from(SESSION_FILE);
+    let session_path = get_session_file();
     let session = Session::load(&session_path)?.ok_or("セッション情報を取得できませんでした")?;
 
     let client = Client::new();

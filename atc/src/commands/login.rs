@@ -4,7 +4,6 @@ use rpassword::read_password;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::path::PathBuf;
 use std::{
     error::Error,
     fs,
@@ -14,15 +13,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// 独自定義情報
-use crate::commands::config::SESSION_FILE;
-
-use super::config::BASE_URL;
+use super::config::{get_session_file, BASE_URL};
 const SESSION_EXPIRY: u64 = 86400; // 24時間
 
 /// ログイン処理のエントリーポイント
 pub async fn execute() -> Result<(), Box<dyn Error>> {
-    let session_path = PathBuf::from(SESSION_FILE);
+    let session_path = get_session_file();
 
     if let Some(session) = Session::load(&session_path)? {
         if !session.is_expired() {
