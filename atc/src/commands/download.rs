@@ -1,39 +1,71 @@
-//! memo
-//! 情報取得とファイル生成の処理を分割して実装を進めていく
-//! - 情報取得
-//!   - 問題一覧の情報取得
-//!   - 問題ごとの詳細情報取得
-//!   - AtCoderページアクセス
-//!   - HTMLから特定の情報を抽出
-//!   - サンプルデータのパース
-//! - ファイル生成
-//!   - Cargo.tomlの生成
-//!   - testsファイル配下のサンプル入出力ファイルの生成
+//! AtCoder のコンテスト情報をダウンロードし、問題ごとのディレクトリ構造を作成するモジュール
+//!
+//! このモジュールには以下の機能が含まれる。
+//! - AtCoder の問題一覧を取得 (`get_problem_list`)
+//! - 各問題のディレクトリを作成 (`create_contest_directory`)
+//! - `Cargo.toml` の生成 (`generate_cargo_toml`)
+//! - `main.rs` のテンプレートコピー (`create_main_rs`)
+//! - サンプル入出力ファイルの作成 (`create_sample_files`)
+//!
+//! ## ディレクトリ構造
+//! このモジュールが処理対象とするディレクトリ構造は以下の通り。
+//!
+//! ```text
+//! .
+//! ├── templates               # テンプレートフォルダ (プログラム生成に利用)
+//! │   ├── main.rs             # main.rs のテンプレート
+//! │   └── Cargo.toml          # Cargo.toml の依存関係テンプレート
+//! └── contest_name            # コンテスト名 (例: abc388)
+//!     ├── Cargo.toml
+//!     ├── Cargo.lock
+//!     ├── a                   # 問題ごとのディレクトリ
+//!     │   ├── main.rs         # 問題に回答するロジックを実装するファイル
+//!     │   └── tests           # AtCoder より取得したサンプル入出力を記録したディレクトリ
+//!     │       ├── sample_1.in
+//!     │       ├── sample_1.out
+//!     │       ├── sample_2.in
+//!     │       └── sample_2.out
+//!     ├── b                   # 問題 B
+//!     ├── c                   # 問題 C
+//!     └── ...                 # その他の問題
+//! ```
+//!
+//! ## 主な処理
+//! 1. **`fetch_html`**: AtCoder の問題ページから HTML を取得
+//! 2. **`get_problem_list`**: HTML を解析し、問題一覧を取得
+//! 3. **`create_contest_directory`**: コンテストのディレクトリ構造を作成
+//! 4. **`generate_cargo_toml`**: `Cargo.toml` を生成し、問題ごとのバイナリ定義を追加
+//! 5. **`create_main_rs`**: `templates/main.rs` をコピーし、各問題の `main.rs` を作成
+//! 6. **`create_sample_files`**: AtCoder から取得したサンプル入出力ファイル (`tests/`) を作成
+//!
+//! ## エラーハンドリング
+//! - **ネットワークエラー**: `fetch_html` で HTTP ステータスコードが `200-299` 以外の場合はエラーを返す
+//! - **HTML パースエラー**: AtCoder の仕様変更により `get_problem_list` のセレクタが一致しない場合、問題一覧を取得できない
+//! - **ディレクトリ作成エラー**: 無効な問題名 (`/`, `?`, `\` を含む) が渡された場合、`create_contest_directory` でエラーを返す
+//! - **ファイル操作エラー**: `Cargo.toml` の作成、`main.rs` のコピー、サンプル入出力ファイルの作成時にエラーが発生する可能性がある
+//!
+//! このモジュールを利用することで、AtCoder のコンテスト環境を迅速にセットアップし、スムーズなコーディング環境を提供する。
 
 use scraper::{ElementRef, Html, Selector};
-use std::error::Error;
-use std::fs::{self, File};
-use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::{
+    error::Error,
+    fs::{self, File},
+    io::{Read, Write},
+    path::PathBuf,
+};
 
+use super::config::BASE_URL;
+
+/// ダウンロード処理のエントリーポイント
 pub async fn execute(work_dir: &PathBuf, contest_name: &str) -> Result<(), Box<dyn Error>> {
-    let base_url = "https://atcoder.jp";
-
-    // 1. コンテストの問題一覧を取得
-    let contest_info = get_problem_list(&base_url, &contest_name).await?;
-    println!("ContestInfo: {:?}", contest_info);
-    // 2. 各問題のディレクトリ構造を作成
+    let contest_info = get_problem_list(BASE_URL, &contest_name).await?;
     create_contest_directory(&work_dir, &contest_info)?;
-
-    // 3. `Cargo.toml` を生成
     generate_cargo_toml(&work_dir, contest_name, &contest_info.problems)?;
 
-    // 4. `main.rs` をコピー
     for problem in &contest_info.problems {
         create_main_rs(&work_dir, contest_name, &problem.problem_name)?;
     }
 
-    // 5. サンプル入出力ファイル (`tests/`) を作成
     for problem in &contest_info.problems {
         create_sample_files(
             &work_dir,
@@ -66,16 +98,26 @@ pub struct Sample {
     pub output: String,
 }
 
-/// ページにアクセスしてHTMLを取得する関数
+/// 指定されたURLからHTMLを取得する
 ///
 /// # 引数
 /// - `url`: 取得するページのURL
 ///
 /// # 戻り値
 /// - `Ok(String)`: HTMLの内容
-/// - `Err(reqwest::Error)`: エラーが発生した場合
+/// - `Err(Box<dyn std::error::Error>)`: HTTPリクエストが失敗した場合、またはステータスコードが成功範囲(200-299)でない場合
+///
+/// # エラーハンドリング
+/// - HTTPリクエストが失敗した場合、エラーを返す
+/// - ステータスコードが 200-299 以外の場合はエラーを返す
 pub async fn fetch_html(url: &str) -> Result<String, Box<dyn std::error::Error>> {
     let response = reqwest::get(url).await?;
+
+    // ステータスコードが 200-299 の範囲であることを確認
+    if !response.status().is_success() {
+        return Err(format!("HTTP request failed with status: {}", response.status()).into());
+    }
+
     let body = response.text().await?;
     Ok(body)
 }
@@ -150,15 +192,24 @@ pub async fn get_problem_list(
     })
 }
 
-/// サンプルデータを取得する関数
+/// AtCoderの問題ページのHTMLからサンプル入出力データを抽出する
 ///
 /// # 引数
-/// - `document`: AtCoderの問題ページのHTML
+/// - `document`: AtCoderの問題ページの `Html` オブジェクト
 ///
 /// # 戻り値
+/// - `Ok(Vec<Sample>)`: 抽出されたサンプル入出力のリスト
+/// - `Err(Box<dyn Error>)`: エラーが発生した場合
 ///
-/// - `Ok(Vec<Sample>)`: サンプル入出力のリスト
-/// - `Err(dyn Error)`: エラーが発生した場合
+/// # 処理の流れ
+/// 1. `h3` タグを解析し、"Sample Input" または "Sample Output" を検索する
+/// 2. `pre` タグの内容を対応する入力または出力として格納する
+/// 3. 入力と出力がペアになっているかを検証し、ペアが崩れている場合はエラーを返す
+///
+/// # エラーの可能性
+/// - `h3` タグが見つからない場合 → `"入力データが見つかりません (h3タグが存在しません)"`
+/// - `pre` タグが見つからない場合 → `"入力データが見つかりません (preタグが存在しません)"`
+/// - 入力と出力の数が一致しない場合 → `"入出力のペアが揃っていません"`
 fn parse_samples(document: &Html) -> Result<Vec<Sample>, Box<dyn Error>> {
     let h3_selector = Selector::parse("h3").unwrap();
     let mut samples = Vec::new();
@@ -219,6 +270,24 @@ fn parse_samples(document: &Html) -> Result<Vec<Sample>, Box<dyn Error>> {
     Ok(samples)
 }
 
+/// コンテストのディレクトリ構造を作成する
+///
+/// # 引数
+/// - `work_dir`: 作業ディレクトリの `PathBuf`
+/// - `contest_info`: コンテスト情報 (`ContestInfo` 構造体)
+///
+/// # 戻り値
+/// - `Ok(())`: ディレクトリ作成が成功した場合
+/// - `Err(Box<dyn Error>)`: 無効なディレクトリ名や作成失敗時のエラー
+///
+/// # 処理の流れ
+/// 1. `contest_info.contest_name` をディレクトリ名として、コンテストディレクトリを作成
+/// 2. 各問題 (`problem_name`) ごとにディレクトリを作成
+/// 3. 各問題の `tests/` ディレクトリを作成
+///
+/// # エラーの可能性
+/// - `contest_name` や `problem_name` に無効な文字（`?`, `/`, `\` など）が含まれている場合
+/// - ディレクトリの作成に失敗した場合（権限不足など）
 fn create_contest_directory(
     work_dir: &PathBuf,
     contest_info: &ContestInfo,
@@ -242,6 +311,28 @@ fn create_contest_directory(
     Ok(())
 }
 
+/// コンテスト用の`Cargo.toml` を生成する
+///
+/// # 引数
+/// - `work_dir`: 作業ディレクトリの `PathBuf`
+/// - `contest_name`: コンテスト名 (`abc388` など)
+/// - `problems`: コンテスト内の問題リスト (`Vec<ProblemInfo>`)
+///
+/// # 戻り値
+/// - `Ok(())`: `Cargo.toml` の生成が成功した場合
+/// - `Err(Box<dyn Error>)`: ファイル作成や書き込みに失敗した場合
+///
+/// # 処理の流れ
+/// 1. `Cargo.toml` のパスを決定
+/// 2. `template/Cargo.toml` の [dependencies] セクションを読み込み（存在する場合）
+/// 3. `Cargo.toml` の [package] セクションを作成
+/// 4. 各問題ごとの `[[bin]]` セクションを追加
+/// 5. 各問題のタイムアウト設定 `[package.metadata.timeout]` を追加
+/// 6. `Cargo.toml` を作成し、書き込み
+///
+/// # エラーの可能性
+/// - `Cargo.toml` の作成に失敗した場合（権限不足など）
+/// - `template/Cargo.toml` の読み取りに失敗した場合（ファイルが破損しているなど）
 fn generate_cargo_toml(
     work_dir: &PathBuf,
     contest_name: &str,
@@ -300,6 +391,26 @@ path = "{}/main.rs"
     Ok(())
 }
 
+/// `main.rs` を問題ごとのディレクトリにコピーする
+///
+/// # 引数
+/// - `work_dir`: 作業ディレクトリの `PathBuf`
+/// - `contest_name`: コンテスト名 (`abc388` など)
+/// - `problem_name`: 問題名 (`a`, `b`, `c` など)
+///
+/// # 戻り値
+/// - `Ok(())`: コピー成功
+/// - `Err(Box<dyn Error>)`: エラー発生時
+///
+/// # 処理の流れ
+/// 1. `templates/main.rs` を読み込む
+/// 2. コンテストディレクトリ内に `problem_name` のディレクトリを作成
+/// 3. `main.rs` をコピー
+///
+/// # エラーの可能性
+/// - `templates/main.rs` が存在しない場合
+/// - ディレクトリの作成に失敗した場合
+/// - ファイルのコピーに失敗した場合
 fn create_main_rs(
     work_dir: &PathBuf,
     contest_name: &str,
@@ -325,6 +436,26 @@ fn create_main_rs(
     }
 }
 
+/// サンプル入出力ファイル (`tests/`) を作成する
+///
+/// # 引数
+/// - `work_dir`: 作業ディレクトリの `PathBuf`
+/// - `contest_name`: コンテスト名 (`abc388` など)
+/// - `problem_name`: 問題名 (`a`, `b`, `c` など)
+/// - `samples`: 入出力サンプルデータのリスト (`Vec<Sample>`)
+///
+/// # 戻り値
+/// - `Ok(())`: 作成成功
+/// - `Err(Box<dyn Error>)`: エラー発生時
+///
+/// # 処理の流れ
+/// 1. `tests/` ディレクトリを作成
+/// 2. 各サンプルの入力 (`sample_x.in`) と出力 (`sample_x.out`) ファイルを作成
+/// 3. 各ファイルにサンプルデータを書き込む
+///
+/// # エラーの可能性
+/// - `tests/` ディレクトリの作成に失敗した場合
+/// - ファイルの作成や書き込みに失敗した場合
 fn create_sample_files(
     work_dir: &PathBuf,
     contest_name: &str,
@@ -353,6 +484,7 @@ fn create_sample_files(
     }
     Ok(())
 }
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -377,13 +509,13 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_fetch_html_not_found() {
+    async fn test_fetch_html_server_error() {
         let mut server = Server::new_async().await;
-        let url = format!("{}/not_found", server.url());
-        let _get_mock = server.mock("GET", "/not_found").with_status(404).create();
+        let url = format!("{}/error", server.url());
+        let _get_mock = server.mock("GET", "/error").with_status(500).create();
+
         let result = fetch_html(&url).await;
-        assert!(result.is_ok());
-        _get_mock.assert();
+        assert!(result.is_err());
     }
 
     #[test]
@@ -502,28 +634,21 @@ mod test {
                     <tbody>
                         <tr>
                             <td class="text-center no-break"><a href="/contests/{}/tasks/{}_a">A</a></td>
-							              <td><a href="/contests/{}/tasks/{}_a">The First Problem</a></td>
-							              <td class="text-right">1 sec</td>
-							              <td class="text-right">1024 MB</td>
+                            <td class="text-right">1 sec</td>
                         </tr>
                         <tr>
                             <td class="text-center no-break"><a href="/contests/{}/tasks/{}_b">B</a></td>
-                            <td class="text-right">4 sec</td>
-							              <td class="text-right">1024 MB</td>
+                            <td class="text-right">2 sec</td>
                         </tr>
                     </tbody>
                 </table>
             </body>
         </html>
     "#,
-            contest_name, contest_name, contest_name, contest_name, contest_name, contest_name
+            contest_name, contest_name, contest_name, contest_name
         );
 
         let mock_problem_a = r#"
-<title>A</title>
-<p>
-  Time Limit: 2 sec / Memory Limit: 1024 MB			
-</p>
 <h3>Sample Input 1</h3><pre>Kyoto
 </pre>
 <h3>Sample Output 1</h3><pre>KUPC
@@ -535,9 +660,6 @@ mod test {
       "#;
 
         let mock_problem_b = r#"
-<p>
-Time Limit: 4 sec / Memory Limit: 1024 MB			
-</p>
 <h3>Sample Input 1</h3><pre>4 3
 3 3
 5 1
@@ -583,8 +705,6 @@ Time Limit: 4 sec / Memory Limit: 1024 MB
             .with_body(mock_problem_b)
             .create();
 
-        // let base_url = "https://atcoder.jp";
-        // let contest_name = "abc388";
         let result = get_problem_list(&base_url, &contest_name).await;
         assert!(result.is_ok());
         let result = result.unwrap();
@@ -600,12 +720,83 @@ Time Limit: 4 sec / Memory Limit: 1024 MB
         assert_eq!(problem_a.samples[1].output, "TUPC\n");
 
         assert_eq!(problem_b.problem_name, "b");
-        assert_eq!(problem_b.timeout, 4000);
+        assert_eq!(problem_b.timeout, 2000);
         assert_eq!(problem_b.samples[0].input, "4 3\n3 3\n5 1\n2 4\n1 10\n");
         assert_eq!(problem_b.samples[0].output, "12\n15\n20\n");
         assert_eq!(problem_b.samples[1].input, "1 4\n100 100\n");
         assert_eq!(problem_b.samples[1].output, "10100\n10200\n10300\n10400\n");
-        println!("{:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_get_problem_list_no_problems() {
+        let mut server = Server::new_async().await;
+        let base_url = server.url();
+        let contest_name = "test_contest";
+        let mock_problem_list_html = r#"
+        <html>
+            <body>
+                <table>
+                    <tbody>
+                    </tbody>
+                </table>
+            </body>
+        </html>
+    "#;
+        let _mock_problem_list = server
+            .mock("GET", format!("/contests/{}/tasks", contest_name).as_str())
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body(mock_problem_list_html)
+            .create();
+
+        let result = get_problem_list(&base_url, contest_name).await;
+        assert!(result.is_ok());
+        let contest_info = result.unwrap();
+        assert_eq!(contest_info.contest_name, contest_name);
+        assert!(contest_info.problems.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_problem_list_invalid_html() {
+        let mut server = Server::new_async().await;
+        let base_url = server.url();
+        let contest_name = "test_contest";
+
+        let mock_invalid_html = r#"
+        <html>
+            <body>
+                <div>Invalid HTML</div>
+            </body>
+        </html>
+    "#;
+
+        let _mock_problem_list = server
+            .mock("GET", format!("/contests/{}/tasks", contest_name).as_str())
+            .with_status(200)
+            .with_header("content-type", "text/html")
+            .with_body(mock_invalid_html)
+            .create();
+
+        let result = get_problem_list(&base_url, contest_name).await;
+        assert!(result.is_ok());
+        let contest_info = result.unwrap();
+        assert_eq!(contest_info.contest_name, contest_name);
+        assert!(contest_info.problems.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_problem_list_network_error() {
+        let mut server = Server::new_async().await;
+        let base_url = server.url();
+        let contest_name = "test_contest";
+
+        let _mock_problem_list = server
+            .mock("GET", format!("/contests/{}/tasks", contest_name).as_str())
+            .with_status(500) // Internal Server Error
+            .create();
+
+        let result = get_problem_list(&base_url, contest_name).await;
+        assert!(result.is_err());
     }
 
     #[test]

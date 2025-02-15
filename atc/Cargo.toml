@@ -13,12 +13,16 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5.24", features = ["derive"] }
+dirs = "6.0.0"
 mockall = "0.13.1"
 reqwest = { version = "0.12.12", features = ["cookies"] }
 rpassword = "7.3.1"
 scraper = "0.22.0"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.138"
 tokio = { version = "1.42.0", features = ["full"] }
 toml = "0.8.19"
+
 
 [dev-dependencies]
 mockito = "1.6.1"
@@ -26,3 +30,5 @@ assert_cmd = "2.0.16"
 mockall = "0.13.1"
 tempfile = "3.15.0"
 serial_test = "3.2"
+regex = "1.11.1"
+urlencoding = "2.1.3"

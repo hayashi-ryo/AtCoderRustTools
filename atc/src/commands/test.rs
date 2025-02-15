@@ -1,22 +1,24 @@
 //! テストケースの収集、資源のコンパイル、実行結果の検証、ユーザへの結果返却を行うモジュール
 //!
 //! このモジュールには以下の機能が含まれる。
-//! - テストケースの収集(`collect_test_cases)
+//! - テストケースの収集(`collect_test_cases`)
 //! - テスト対象資源のコンパイル(`compile`)
 //! - テスト対象バイナリファイルのパス取得(`get_execution_path`)
 //! - テストケースごとの実行結果の取得(`return_results`)
 //!
 //! このモジュールで処理対象となるディレクトリ構造は以下となる:
+//! ```text
 //! .
-//! ├── Cargo.toml    : AtCoderに対応する依存関係を記録したファイル
+//! ├── Cargo.toml    # AtCoderに対応する依存関係を記録したファイル
 //! ├── Cargo.lock
-//! └── problem_name  : 入力として与える問題名
-//!     ├── main.rs   : 問題に回答するロジックを実装するファイル
-//!     └── tests     : AtCoderより取得したサンプル入出力を記録したディレクトリ
+//! └── problem_name  # 入力として与える問題名
+//!     ├── main.rs   # 問題に回答するロジックを実装するファイル
+//!     └── tests     # AtCoderより取得したサンプル入出力を記録したディレクトリ
 //!         ├── sample_1.in
 //!         ├── sample_1.out    
 //!         ├── sample_2.in
 //!         └── sample_2.out
+//! ```
 use std::{
     collections::HashMap,
     error::Error,
@@ -27,7 +29,6 @@ use std::{
     process::{Command, Stdio},
     time::Instant,
 };
-
 use toml::Value;
 
 /// 問題名を基にテストケースの収集、資源のコンパイル、テスト結果の検証を実行する
