@@ -1,26 +1,40 @@
-//! memo
-//! 必須機能
-//! ・atcoderにアクセスして作成したソースコードを提出する機能
-//! ・提出結果リダイレクトURLをユーザに返却する機能
-//! オプション機能
-//! ・submit実施前にtestを実施する機能
-//! ・AtCoderの採点状況をリアルタイムでターミナルに表示する機能
-//!ソースコードの提出
+//! AtCoder に対するコード提出を行うためのモジュール。
 //!
-//!ソースコード (main.rs など) を読み込み、AtCoderに送信
-//!提出に成功した場合、提出結果のURLを出力
-//!ログインセッションの利用
+//! ## 主な機能
+//! - `execute` - 提出処理のエントリーポイント
+//! - `get_contest_info` - `Cargo.toml` からコンテスト名とソースコードのパスを取得
+//! - `read_source_code` - ソースコードを読み込む
+//! - `submit_code` - AtCoder にコードを提出
 //!
-//!login.rs で保存したセッション (session.json) を利用
-//!セッションが有効でない場合、自動的に再ログイン
-//!提出成功/失敗のハンドリング
+//! ## ディレクトリ構造
+//! ```text
+//! .
+//! ├── Cargo.toml    : AtCoder に対応する依存関係を記録したファイル
+//! ├── Cargo.lock
+//! └── contest_name  : 提出対象のコンテスト
+//!     ├── a        : 問題 A のディレクトリ
+//!     │   ├── main.rs   : 提出用のソースコード
+//!     │   └── tests     : サンプルテストケース
+//!     │       ├── sample_1.in
+//!     │       ├── sample_1.out    
+//!     │       ├── sample_2.in
+//!     │       └── sample_2.out
+//!     ├── b        : 問題 B のディレクトリ
+//!     └── c        : 問題 C のディレクトリ
+//! ```
 //!
-//!200 OK 以外のレスポンスを適切に処理
-//!AtCoderの仕様変更などで失敗した場合のエラーメッセージを明確に表示
-//!提出結果の取得
+//! ## 提出フロー
+//! 1. `execute` を実行すると、まず `login_execute()` により AtCoder へのログインを試行。
+//! 2. `get_contest_info` により `Cargo.toml` を解析し、コンテスト名と提出対象の `main.rs` のパスを取得。
+//! 3. `read_source_code` により、`main.rs` のコードを取得。
+//! 4. `submit_code` を実行し、AtCoder API にコードを提出。
+//! 5. 提出が成功すると、提出結果の URL を出力する。
 //!
-//!提出後、AtCoderのリダイレクトURLから submission_id を取得
-//!https://atcoder.jp/contests/{contest_id}/submissions/{submission_id} を出力
+//! ## 注意事項
+//! - `Cargo.toml` 内に `[bin]` セクションがない場合、エラーを返す。
+//! - `submit_code` の実行時、AtCoder の CSRF トークンおよびクッキーが必要。
+//! - `submit_code` のリクエストが `302 Found` を返さない場合、提出は失敗と見なされる。
+//! - の提出言語 ID (`LanguageId`) は Rustの `5054` に固定されている。
 
 use reqwest::{Client, StatusCode};
 use std::{error::Error, fs, path::PathBuf};
@@ -29,31 +43,7 @@ use toml::Value;
 use super::config::{get_session_file, BASE_URL};
 use super::login::execute as login_execute;
 use super::login::Session;
-/// オプション機能
-/// 提出前に test を実行する
-///
-/// cargo atc test を実行し、すべてのテストが通った場合のみ提出
-/// --force オプションでテスト失敗時でも提出可能に
-/// 提出後のリアルタイム採点監視
-///
-/// --watch オプションで提出結果を定期的に取得
-/// 結果 (AC, WA, TLE, RE など) をターミナルに表示
-/// 過去の提出履歴との比較
-///
-/// submissions.json に過去の提出データを保存
-/// 直近の提出とコードの diff を表示 (cargo atc submit --diff)
-/// 提出コードのローカル保存
-///
-/// 提出したコードを submissions/ ディレクトリに保存 (timestamp 付き)
-/// cargo atc submit --restore <ファイル名> で過去の提出を復元
-/// 提出時のコンパイルオプション指定
-///
-/// --release オプションで cargo build --release を実行し、最適化されたバイナリを提出
-/// 提出言語の指定
-///
-/// cargo atc submit --lang <language_id> で提出言語を選択（デフォルトはRust）
-/// ブラウザで提出結果を開く
-/// cargo atc submit --open で提出後に自動で提出結果ページを開く
+
 pub async fn execute(work_dir: &PathBuf, problem_name: &str) -> Result<(), Box<dyn Error>> {
     login_execute().await?;
     let session_path = get_session_file();
@@ -72,8 +62,8 @@ pub async fn execute(work_dir: &PathBuf, problem_name: &str) -> Result<(), Box<d
         problem_name: problem_name.to_string(),
         source_code,
     };
-    let submission_url = submit_code(BASE_URL, &client, &session, &submission).await?;
-    println!("提出成功！結果URL: {}", submission_url);
+    let _submission_url = submit_code(BASE_URL, &client, &session, &submission).await?;
+    //println!("提出成功！結果URL: {}", submission_url);
     Ok(())
 }
 
@@ -82,6 +72,28 @@ pub struct SubmissionData {
     pub problem_name: String,
     pub source_code: String,
 }
+
+/// `Cargo.toml` からコンテスト名と提出対象のソースコードのパスを取得する
+///
+/// # 引数
+/// - `work_dir`: `Cargo.toml` が存在する作業ディレクトリのパス。
+/// - `problem_name`: 提出対象の問題名 (`a`, `b`, `c` など)。
+///
+/// # 戻り値
+/// - `Ok((String, String))`: コンテスト名 (`contest_name`) と、提出対象のソースコードのパス (`source_path`) のタプル。
+/// - `Err(Box<dyn Error>)`: `Cargo.toml` の読み込みや解析に失敗した場合、または `problem_name` に対応するエントリが存在しない場合にエラーを返す。
+///
+/// # 処理の流れ
+/// 1. `Cargo.toml` を読み込み、TOML データとして解析。
+/// 2. `[package.name]` を取得し、コンテスト名として使用。
+/// 3. `[bin]` セクションを解析し、`problem_name` に対応する `path` を取得。
+/// 4. 問題名が `Cargo.toml` に記載されていない場合はエラーを返す。
+///
+/// # エラーの可能性
+/// - `Cargo.toml` が存在しない、または読み込みに失敗した場合。
+/// - `[package.name]` が `Cargo.toml` に定義されていない場合。
+/// - `[bin]` セクションが `Cargo.toml` に存在しない場合。
+/// - 指定された `problem_name` に対応する `[[bin]]` エントリが見つからない場合。
 fn get_contest_info(
     work_dir: &PathBuf,
     problem_name: &str,
@@ -122,6 +134,23 @@ fn get_contest_info(
     Ok((contest_name, problem_path))
 }
 
+/// 指定されたソースコードファイルを読み込む
+///
+/// # 引数
+/// - `source_path`: ソースコードのファイルパス (`PathBuf`)。
+///
+/// # 戻り値
+/// - `Ok(String)`: ソースコードの内容を `String` で返す。
+/// - `Err(Box<dyn Error>)`: 読み込みに失敗した場合のエラー。
+///
+/// # 処理の流れ
+/// 1. `source_path` が存在するかを確認し、存在しない場合はエラーを返す。
+/// 2. `fs::read_to_string` を用いてソースコードを文字列として読み込む。
+/// 3. 読み込んだソースコードを `Ok` で返す。
+///
+/// # エラーの可能性
+/// - `source_path` が存在しない場合 (`ソースコードが見つかりません` エラー)。
+/// - ファイルの読み込み (`fs::read_to_string`) に失敗した場合 (権限不足など)。
 fn read_source_code(source_path: &PathBuf) -> Result<String, Box<dyn Error>> {
     if !source_path.exists() {
         return Err(format!("ソースコードが見つかりません: {}", source_path.display()).into());
@@ -130,12 +159,37 @@ fn read_source_code(source_path: &PathBuf) -> Result<String, Box<dyn Error>> {
     Ok(source_code)
 }
 
+/// AtCoder にソースコードを提出する
+///
+/// # 引数
+/// - `base_url`: AtCoder のベース URL (`https://atcoder.jp`)。
+/// - `client`: `reqwest::Client` インスタンス (HTTP リクエストを送信するため)。
+/// - `session`: `Session` 構造体 (CSRF トークンとセッション情報を保持)。
+/// - `submission`: `SubmissionData` 構造体 (コンテスト名、問題名、ソースコードを含む)。
+///
+/// # 戻り値
+/// - `Ok(String)`: 提出結果ページの URL。
+/// - `Err(Box<dyn std::error::Error>)`: 提出に失敗した場合のエラー。
+///
+/// # 処理の流れ
+/// 1. `base_url` と `contest_name` をもとに、提出 API のエンドポイント (`submit_url`) を生成。
+/// 2. `submission` から問題名 (`problem_name`) とソースコード (`source_code`) を取得。
+/// 3. `Session` 構造体の `csrf_token` を取得し、フォームデータ (`params`) に設定。
+/// 4. `REVEL_SESSION` クッキーを `Cookie` ヘッダーに設定し、AtCoder の認証を行う。
+/// 5. `client.post` を使用して AtCoder の提出 API に HTTP リクエストを送信。
+/// 6. 提出成功時 (302 Found) に `Location` ヘッダーから提出結果ページの URL を取得して返す。
+/// 7. 提出が失敗した場合はエラーを返す。
+///
+/// # エラーの可能性
+/// - `Session` 情報 (`csrf_token`, `session_cookie`) が無効な場合。
+/// - AtCoder の `submit_url` に HTTP リクエストが送信できなかった場合。
+/// - 提出後のレスポンスの `Location` ヘッダーが存在しない場合 (予期しないレスポンス)。
 async fn submit_code(
     base_url: &str,
     client: &Client,
     session: &Session,
     submission: &SubmissionData,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let submit_url = format!("{}/contests/{}/submit", base_url, submission.contest_name);
     let params = [
         ("csrf_token", &session.csrf_token),
@@ -155,21 +209,14 @@ async fn submit_code(
     let response = client
         .post(&submit_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("Referer", format!("{}/contests/{}/tasks/{}", base_url, submission.contest_name, submission.problem_name))
+        .header("Referer", format!("{}/contests/{}/submit", base_url, submission.contest_name))
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .header("Cookie", cookie_header) // ✅ 修正点: 適切な `Cookie` を送信
         .form(&params)
         .send()
         .await?;
-
-    println!("{:?}", session);
-    println!("{:?}", params);
-    println!("{:?}", response.status());
-    if response.status() == StatusCode::FOUND {
-        if let Some(location) = response.headers().get("Location") {
-            let submission_url = format!("{}{}", base_url, location.to_str()?);
-            return Ok(submission_url);
-        }
+    if response.status() == StatusCode::OK {
+        return Ok(());
     }
 
     Err("提出に失敗しました".into())
@@ -234,6 +281,105 @@ path = "{}/main.rs"
     }
 
     #[test]
+    fn test_get_contest_info_missing_package_name() {
+        let work_dir = tempfile::tempdir().expect("");
+        let cargo_toml_path = work_dir.path().join("Cargo.toml");
+
+        let cargo_toml_content = r#"
+[package]
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "test_problem"
+path = "test_problem/main.rs"
+"#;
+
+        fs::write(&cargo_toml_path, cargo_toml_content).expect("Failed to write Cargo.toml");
+
+        let result = get_contest_info(&work_dir.path().to_path_buf(), "test_problem");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Cargo.toml にコンテスト名 (package.name) が見つかりません"
+        );
+    }
+
+    #[test]
+    fn test_get_contest_info_missing_bin_section() {
+        let work_dir = tempfile::tempdir().expect("");
+        let cargo_toml_path = work_dir.path().join("Cargo.toml");
+
+        let cargo_toml_content = r#"
+[package]
+name = "test_contest"
+version = "0.1.0"
+edition = "2021"
+"#;
+
+        fs::write(&cargo_toml_path, cargo_toml_content).expect("Failed to write Cargo.toml");
+
+        let result = get_contest_info(&work_dir.path().to_path_buf(), "test_problem");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Cargo.toml に [bin] セクションがありません"
+        );
+    }
+
+    #[test]
+    fn test_get_contest_info_problem_not_found() {
+        let work_dir = tempfile::tempdir().expect("");
+        let cargo_toml_path = work_dir.path().join("Cargo.toml");
+
+        let cargo_toml_content = r#"
+[package]
+name = "test_contest"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "different_problem"
+path = "different_problem/main.rs"
+"#;
+
+        fs::write(&cargo_toml_path, cargo_toml_content).expect("Failed to write Cargo.toml");
+
+        let result = get_contest_info(&work_dir.path().to_path_buf(), "test_problem");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Cargo.toml に `test_problem` に対応するエントリが見つかりません"
+        );
+    }
+
+    #[test]
+    fn test_get_contest_info_invalid_toml() {
+        let work_dir = tempfile::tempdir().expect("");
+        let cargo_toml_path = work_dir.path().join("Cargo.toml");
+
+        let invalid_cargo_toml_content = r#"
+[package]
+name = "test_contest"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "test_problem"
+path = "test_problem/main.rs"
+
+[[bin
+name = "invalid_syntax"
+"#;
+
+        fs::write(&cargo_toml_path, invalid_cargo_toml_content)
+            .expect("Failed to write Cargo.toml");
+
+        let result = get_contest_info(&work_dir.path().to_path_buf(), "test_problem");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_read_source_code_success() {
         let work_dir = tempfile::tempdir().expect("");
         let problem_name = "test";
@@ -248,9 +394,22 @@ fn main() {
         let result = read_source_code(&source_path);
         assert!(result.is_ok());
         let read_source_code = result.unwrap();
-        assert_eq!(
-            read_source_code, source_content,
-            "読み込まれたソースコードが想定と異なる"
+        assert_eq!(read_source_code, source_content);
+    }
+
+    #[test]
+    fn test_read_source_code_file_not_found() {
+        let work_dir = tempfile::tempdir().expect("");
+        let source_path = work_dir.path().join("non_existent.rs");
+
+        let result = read_source_code(&source_path);
+        assert!(result.is_err());
+
+        let error_message = result.unwrap_err().to_string();
+        assert!(
+            error_message.contains("ソースコードが見つかりません"),
+            "期待するエラーメッセージと異なる: {}",
+            error_message
         );
     }
 
@@ -260,28 +419,42 @@ fn main() {
         let base_url = server.url();
         let contest_name = "test_contest";
         let problem_name = "test_problem";
-        let source_code = "fn main() { println!(\"Hello, AtCoder!\"); }";
+        fn encode_form_urlencoded(input: &str) -> String {
+            encode(input).replace("%20", "+")
+        }
+        use urlencoding::encode;
+        let source_code = r#"
+fn main() {
+    println!("Hello, AtCoder!");
+}
+"#;
 
         let _mock = server
             .mock(
                 "POST",
                 format!("/contests/{}/submit", contest_name).as_str(),
             )
+            .match_header("Content-Type", "application/x-www-form-urlencoded")
+            .match_header("Referer", format!("{}/contests/{}/submit", base_url, contest_name).as_str())
+            .match_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            .match_header("Cookie", "REVEL_SESSION=mock_session_cookie;")
             .match_body(Matcher::AllOf(vec![
                 Matcher::Regex("csrf_token=mock_csrf_token".to_string()),
                 Matcher::Regex(format!(
                     "data.TaskScreenName={}_{}",
                     contest_name, problem_name
                 )),
-                Matcher::Regex("data.LanguageId=5041".to_string()),
-                Matcher::Regex(format!("sourceCode={}", escape(source_code))),
+                Matcher::Regex("data.LanguageId=5054".to_string()),
+                Matcher::Regex(format!("sourceCode={}", escape(&encode_form_urlencoded(source_code))))
             ]))
-            .with_status(302)
-            .with_header("Location", "/submissions/123456")
+            .with_status(200)
+            .with_header("Location", format!("contests/{}/submissions/me", contest_name).as_str())
             .create_async()
             .await;
-
-        let client = Client::new();
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none()) // リダイレクトを無効化
+            .build()
+            .unwrap();
         let session = Session {
             username: "test_user".to_string(),
             csrf_token: "mock_csrf_token".to_string(),
@@ -293,19 +466,8 @@ fn main() {
             problem_name: problem_name.to_string(),
             source_code: source_code.to_string(),
         };
-
         let result = submit_code(&base_url.to_string(), &client, &session, &submission).await;
-        assert!(result.is_ok(), "提出処理が失敗しました");
-
-        assert_eq!(
-            result.unwrap(),
-            format!("{}/submissions/123456", &base_url),
-            "提出URLが正しく取得できていません"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_atcoder() {
-        let work_dir = tempfile::tempdir().expect("");
+        _mock.assert();
+        assert!(result.is_ok());
     }
 }

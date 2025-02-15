@@ -23,6 +23,7 @@ serde_json = "1.0.138"
 tokio = { version = "1.42.0", features = ["full"] }
 toml = "0.8.19"
 
+
 [dev-dependencies]
 mockito = "1.6.1"
 assert_cmd = "2.0.16"
@@ -30,3 +31,4 @@ mockall = "0.13.1"
 tempfile = "3.15.0"
 serial_test = "3.2"
 regex = "1.11.1"
+urlencoding = "2.1.3"

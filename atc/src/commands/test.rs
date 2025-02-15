@@ -7,6 +7,7 @@
 //! - テストケースごとの実行結果の取得(`return_results`)
 //!
 //! このモジュールで処理対象となるディレクトリ構造は以下となる:
+//! ```text
 //! .
 //! ├── Cargo.toml    # AtCoderに対応する依存関係を記録したファイル
 //! ├── Cargo.lock
@@ -17,6 +18,7 @@
 //!         ├── sample_1.out    
 //!         ├── sample_2.in
 //!         └── sample_2.out
+//! ```
 use std::{
     collections::HashMap,
     error::Error,
